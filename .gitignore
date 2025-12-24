@@ -1,0 +1,8 @@
+Cargo.lock
+src/.*.swp
+target/
+.target/*
+*.log
+justfile
+.vscode/*
+.idea/*

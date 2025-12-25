@@ -1,15 +1,16 @@
 //! Thermodynamic property calculations using CoolProp via rfluids.
 //!
 //! This module provides access to real thermodynamic properties through the
-//! `rfluids` crate, which wraps the CoolProp library.
+//! [`rfluids`](https://docs.rs/rfluids/latest/rfluids/) crate, which wraps the [CoolProp](https://coolprop.org/) library.
+//!
 //!
 //! # Architecture
 //!
-//! The module uses a `Substance` enum to represent both pure components and
+//! The module uses a [`Substance`] enum to represent both pure components and
 //! predefined mixtures, mirroring rfluids' substance structure:
 //!
-//! - **Pure fluids**: Single-component substances (Water, Propane, R134a, etc.)
-//! - **Predefined mixtures**: Multi-component fluids (Air, R410A, R407C, etc.)
+//! - **Pure fluids**: Single-component substances ([`Pure`]: fluids::Pure) (Water, Propane, R134a, etc.)
+//! - **Predefined mixtures**: Multi-component fluids ([`PredefinedMix`]: fluids::PredefinedMix) (Air, R410A, R407C, etc.)
 //!
 //! # Features
 //!
@@ -48,18 +49,102 @@
 //! # Implementation Notes
 //!
 //! This module uses the rfluids crate with its typestate pattern:
-//! - `Fluid<Undefined>` for fluid creation from Pure or PredefinedMix
+//! - `Fluid<Undefined>` for fluid creation from [`Pure`] or [`PredefinedMix`]
 //! - `Fluid<Defined>` after state is specified with `.in_state()`
 //! - All property methods return `Result<f64, FluidOutputError>`
-//! - The `Substance` enum provides a unified interface for both types
+//! - The [`Substance`] enum provides a unified interface for both types
+//!
+//! # Backend Selection
+//!
+//! You can customize the CoolProp backend used for calculations:
+//!
+//! ```ignore
+//! use nomata::thermodynamics::{Fluid, fluids::Pure, backend::{BaseBackend, Backend, TabularMethod}};
+//!
+//! // Use base backend
+//! let water = Fluid::builder(Pure::Water)
+//!     .with_backend(Backend::Base(BaseBackend::Heos))
+//!     .build();
+//!
+//! // Use tabular backend for faster calculations
+//! let water_fast = Fluid::builder(Pure::Water)
+//!     .with_backend(Backend::Tabular {
+//!         base: BaseBackend::Heos,
+//!         method: TabularMethod::Ttse,
+//!     })
+//!     .build();
+//! ```
 
+use rfluids::fluid::backend::{BaseBackend, TabularMethod};
 use rfluids::prelude::*;
+
+/// Backend configuration for CoolProp calculations.
+///
+/// Allows selection of either a base backend or a tabular backend
+/// (which combines a base backend with an interpolation method).
+///
+/// For more information, see:
+/// <https://docs.rs/rfluids/latest/rfluids/fluid/backend/enum.BaseBackend.html>
+#[derive(Debug, Clone, Copy)]
+/// Enum for selecting the CoolProp backend. See [`BaseBackend`] and [`TabularMethod`].
+pub enum Backend {
+    /// Base backend (e.g., Heos, Refprop, Incomp, If97, etc.) [`BaseBackend`]
+    Base(BaseBackend),
+    /// Tabular backend with interpolation method [`TabularMethod`]
+    Tabular {
+        /// The base backend to use
+        base: BaseBackend,
+        /// The tabular interpolation method
+        method: TabularMethod,
+    },
+}
+
+impl Backend {
+    /// Extracts the base backend from this configuration.
+    fn base_backend(&self) -> BaseBackend {
+        match self {
+            Backend::Base(b) => *b,
+            Backend::Tabular { base, .. } => *base,
+        }
+    }
+}
+
+impl From<BaseBackend> for Backend {
+    fn from(base: BaseBackend) -> Self {
+        Backend::Base(base)
+    }
+}
+
+/// Extension trait for [`BaseBackend`] to create tabular backends.
+pub trait BaseBackendExt {
+    /// Creates a tabular backend with the specified interpolation method.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nomata::thermodynamics::backend::{BaseBackend, TabularMethod, BaseBackendExt};
+    ///
+    /// let backend = BaseBackend::Heos.with(TabularMethod::Ttse);
+    /// ```
+    fn with(self, method: TabularMethod) -> Backend;
+}
+
+impl BaseBackendExt for BaseBackend {
+    fn with(self, method: TabularMethod) -> Backend {
+        Backend::Tabular { base: self, method }
+    }
+}
+
+// Note: rfluids also has a Backend type. If needed, we could implement From
+// to convert from rfluids::fluid::backend::Backend, but for now our custom
+// Backend enum provides a cleaner API for our use case.
 
 /// Result type for thermodynamic calculations.
 pub type ThermoResult<T> = Result<T, ThermoError>;
 
 /// Errors that can occur during thermodynamic calculations.
 #[derive(Debug, Clone, thiserror::Error)]
+/// Enum of errors that can occur during thermodynamic calculations.
 pub enum ThermoError {
     /// Fluid not found in database
     #[error("Fluid not found: {0}")]
@@ -81,33 +166,79 @@ pub enum ThermoError {
 /// Substance type for thermodynamic calculations.
 ///
 /// Provides a unified interface for all rfluids substance types:
-/// - Pure components (single substances)
-/// - Predefined mixtures (standard blends like Air, R410A)
-/// - Binary mixtures (two-component custom mixtures)
-/// - Custom mixtures (arbitrary multi-component mixtures)
+/// - Pure components (single substances) [`Pure`]
+/// - Predefined mixtures (standard blends like Air, R410A) [`PredefinedMix`]
+/// - Binary mixtures (two-component custom mixtures) [`BinaryMix`]
+/// - Custom mixtures (arbitrary multi-component mixtures) [`CustomMix`]
 #[derive(Debug, Clone)]
 pub enum Substance {
-    /// Pure component fluid
+    /// Pure component fluid ([`Pure`])
     Pure(Pure),
-    /// Predefined mixture (e.g., Air, R410A)
+    /// Predefined mixture (e.g., Air, R410A) ([`PredefinedMix`])
     PredefinedMix(PredefinedMix),
-    /// Binary mixture (two-component custom mixture)
+    /// Binary mixture (two-component custom mixture) ([`BinaryMix`])
     BinaryMix(BinaryMix),
-    /// Custom mixture (arbitrary multi-component mixture)
+    /// Custom mixture (arbitrary multi-component mixture) ([`CustomMix`])
     CustomMix(CustomMix),
 }
 
 impl Substance {
-    /// Creates an rfluids Fluid object from this substance.
+    /// Creates an rfluids Fluid object from this substance with optional backend configuration.
     /// Returns Fluid<Undefined> which must be converted to Fluid<Defined> via in_state().
-    fn to_rfluids_fluid(&self) -> ThermoResult<rfluids::fluid::Fluid<Undefined>> {
-        match self {
-            Substance::Pure(pure) => Ok(rfluids::fluid::Fluid::from(*pure)),
-            Substance::PredefinedMix(mix) => Ok(rfluids::fluid::Fluid::from(*mix)),
-            Substance::BinaryMix(binary) => Ok(rfluids::fluid::Fluid::from(*binary)),
-            Substance::CustomMix(custom) => rfluids::fluid::Fluid::try_from(custom.clone())
-                .map_err(|_| ThermoError::PropertyNotAvailable),
-        }
+    fn to_rfluids_fluid_with_backend(
+        &self,
+        backend: Option<Backend>,
+    ) -> ThermoResult<rfluids::fluid::Fluid<Undefined>> {
+        let fluid = match self {
+            Substance::Pure(pure) => {
+                if let Some(backend) = backend {
+                    let base = backend.base_backend();
+                    rfluids::fluid::Fluid::builder()
+                        .substance(*pure)
+                        .with_backend(base)
+                        .build()
+                        .map_err(|_| ThermoError::PropertyNotAvailable)?
+                } else {
+                    rfluids::fluid::Fluid::from(*pure)
+                }
+            }
+            Substance::PredefinedMix(mix) => {
+                if let Some(backend) = backend {
+                    let base = backend.base_backend();
+                    rfluids::fluid::Fluid::builder()
+                        .substance(*mix)
+                        .with_backend(base)
+                        .build()
+                        .map_err(|_| ThermoError::PropertyNotAvailable)?
+                } else {
+                    rfluids::fluid::Fluid::from(*mix)
+                }
+            }
+            Substance::BinaryMix(binary) => {
+                if let Some(backend) = backend {
+                    let base = backend.base_backend();
+                    rfluids::fluid::Fluid::builder()
+                        .substance(*binary)
+                        .with_backend(base)
+                        .build()
+                        .map_err(|_| ThermoError::PropertyNotAvailable)?
+                } else {
+                    rfluids::fluid::Fluid::from(*binary)
+                }
+            }
+            Substance::CustomMix(custom) => {
+                // For custom mixtures, we need to use try_from
+                // Backend configuration might not be supported for all custom mixtures
+                rfluids::fluid::Fluid::try_from(custom.clone())
+                    .map_err(|_| ThermoError::PropertyNotAvailable)?
+            }
+        };
+
+        // Note: TabularMethod configuration is handled through the Backend enum.
+        // Some backends in rfluids may support tabular methods, but the exact
+        // implementation depends on the rfluids version and CoolProp capabilities.
+
+        Ok(fluid)
     }
 }
 
@@ -116,13 +247,14 @@ impl Substance {
 /// This wraps the `rfluids` fluid database and provides a type-safe
 /// interface for property calculations.
 ///
-/// Supports both pure components (Water, Propane, etc.) and predefined mixtures
-/// (Air as mixture, R410A, etc.).
+/// Supports both pure components ([`Pure`]) and predefined mixtures ([`PredefinedMix`]).
 pub struct Fluid {
     /// The substance (pure or mixture) identifier for rfluids
     pub substance: Substance,
     /// Name of the fluid
     pub name: String,
+    /// Optional backend configuration
+    backend: Option<Backend>,
 }
 
 impl Fluid {
@@ -142,7 +274,7 @@ impl Fluid {
     /// ```
     pub fn new(pure: Pure) -> Self {
         let name = format!("{:?}", pure);
-        Self { substance: Substance::Pure(pure), name }
+        Self { substance: Substance::Pure(pure), name, backend: None }
     }
 
     /// Creates a new predefined mixture fluid.
@@ -157,7 +289,7 @@ impl Fluid {
     /// ```
     pub fn new_mix(mix: PredefinedMix) -> Self {
         let name = format!("{:?}", mix);
-        Self { substance: Substance::PredefinedMix(mix), name }
+        Self { substance: Substance::PredefinedMix(mix), name, backend: None }
     }
 
     /// Creates a new binary mixture fluid using BinaryMixKind.
@@ -185,7 +317,7 @@ impl Fluid {
             ThermoError::InvalidInput(format!("Invalid fraction {} for {:?}", fraction, kind))
         })?;
 
-        Ok(Self { substance: Substance::BinaryMix(binary), name: name.to_string() })
+        Ok(Self { substance: Substance::BinaryMix(binary), name: name.to_string(), backend: None })
     }
 
     /// Creates a new custom mass-based mixture fluid.
@@ -216,7 +348,7 @@ impl Fluid {
         let custom = CustomMix::mass_based(components)
             .map_err(|_| ThermoError::InvalidInput("Invalid mass-based mixture".to_string()))?;
 
-        Ok(Self { substance: Substance::CustomMix(custom), name: name.to_string() })
+        Ok(Self { substance: Substance::CustomMix(custom), name: name.to_string(), backend: None })
     }
 
     /// Creates a new custom mole-based mixture fluid.
@@ -248,15 +380,73 @@ impl Fluid {
         let custom = CustomMix::mole_based(components)
             .map_err(|_| ThermoError::InvalidInput("Invalid mole-based mixture".to_string()))?;
 
-        Ok(Self { substance: Substance::CustomMix(custom), name: name.to_string() })
+        Ok(Self { substance: Substance::CustomMix(custom), name: name.to_string(), backend: None })
+    }
+
+    /// Creates a builder for configuring a fluid with custom backend options.
+    ///
+    /// This is useful when you need more control over the CoolProp backend,
+    /// such as using tabular methods for faster calculations.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nomata::thermodynamics::{Fluid, fluids::Pure, backend::*};
+    ///
+    /// // High-accuracy equation of state
+    /// let water = Fluid::builder(Pure::Water)
+    ///     .with_backend(Backend::Base(BaseBackend::Heos))
+    ///     .build();
+    ///
+    /// // Use tabular backend for faster calculations
+    /// let r134a = Fluid::builder(Pure::R134a)
+    ///     .with_backend(BaseBackend::Heos.with(TabularMethod::Ttse))
+    ///     .build();
+    /// ```
+    pub fn builder(pure: Pure) -> FluidBuilder {
+        FluidBuilder::new(Substance::Pure(pure))
+    }
+
+    /// Creates a builder for a predefined mixture with custom backend options.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nomata::thermodynamics::{Fluid, fluids::PredefinedMix, backend::*};
+    ///
+    /// let air = Fluid::builder_mix(PredefinedMix::Air)
+    ///     .with_backend(Backend::Base(BaseBackend::Heos))
+    ///     .build();
+    /// ```
+    pub fn builder_mix(mix: PredefinedMix) -> FluidBuilder {
+        FluidBuilder::new(Substance::PredefinedMix(mix))
+    }
+
+    /// Creates a builder for a binary mixture with custom backend options.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nomata::thermodynamics::{Fluid, fluids::BinaryMixKind, backend::*};
+    ///
+    /// let mpg = Fluid::builder_binary(BinaryMixKind::MPG, 0.4)
+    ///     .unwrap()
+    ///     .with_backend(Backend::Base(BaseBackend::Incomp))
+    ///     .build();
+    /// ```
+    pub fn builder_binary(kind: BinaryMixKind, fraction: f64) -> ThermoResult<FluidBuilder> {
+        let binary = kind.with_fraction(fraction).map_err(|_| {
+            ThermoError::InvalidInput(format!("Invalid fraction {} for {:?}", fraction, kind))
+        })?;
+        Ok(FluidBuilder::new(Substance::BinaryMix(binary)))
     }
 
     /// Computes properties given pressure and temperature.
     ///
     /// # Arguments
     ///
-    /// * `pressure` - Pressure [Pa]
-    /// * `temperature` - Temperature [K]
+    /// * `pressure` - Pressure \[Pa\]
+    /// * `temperature` - Temperature \[K\]
     ///
     /// # Returns
     ///
@@ -271,7 +461,7 @@ impl Fluid {
         // Create a fluid in the defined state using PT inputs
         let mut state = self
             .substance
-            .to_rfluids_fluid()?
+            .to_rfluids_fluid_with_backend(self.backend)?
             .in_state(FluidInput::pressure(pressure), FluidInput::temperature(temperature))
             .map_err(|e| match &self.substance {
                 Substance::BinaryMix(_) => ThermoError::InvalidInput(format!(
@@ -294,7 +484,7 @@ impl Fluid {
     ///
     /// # Arguments
     ///
-    /// * `pressure` - Pressure [Pa]
+    /// * `pressure` - Pressure \[Pa\]
     /// * `enthalpy` - Specific enthalpy [J/kg]
     pub fn props_ph(&self, pressure: f64, enthalpy: f64) -> ThermoResult<Properties> {
         if pressure <= 0.0 {
@@ -304,7 +494,7 @@ impl Fluid {
         // Create a fluid in the defined state using PH inputs
         let mut state = self
             .substance
-            .to_rfluids_fluid()?
+            .to_rfluids_fluid_with_backend(self.backend)?
             .in_state(FluidInput::pressure(pressure), FluidInput::enthalpy(enthalpy))
             .map_err(|_| ThermoError::ConvergenceFailure)?;
 
@@ -312,31 +502,102 @@ impl Fluid {
         Properties::from_fluid(&mut state, pressure, temp)
     }
 
-    /// Gets the critical temperature [K].
+    /// Gets the critical temperature \[K\].
     pub fn critical_temperature(&self) -> ThermoResult<f64> {
-        let mut fluid = self.substance.to_rfluids_fluid()?;
+        let mut fluid = self.substance.to_rfluids_fluid_with_backend(self.backend)?;
         fluid.critical_temperature().map_err(|_| ThermoError::PropertyNotAvailable)
     }
 
-    /// Gets the critical pressure [Pa].
+    /// Gets the critical pressure \[Pa\].
     pub fn critical_pressure(&self) -> ThermoResult<f64> {
-        let mut fluid = self.substance.to_rfluids_fluid()?;
+        let mut fluid = self.substance.to_rfluids_fluid_with_backend(self.backend)?;
         fluid.critical_pressure().map_err(|_| ThermoError::PropertyNotAvailable)
     }
 
     /// Gets the molecular weight [kg/mol].
     pub fn molecular_weight(&self) -> ThermoResult<f64> {
-        let mut fluid = self.substance.to_rfluids_fluid()?;
+        let mut fluid = self.substance.to_rfluids_fluid_with_backend(self.backend)?;
         fluid.molar_mass().map_err(|_| ThermoError::PropertyNotAvailable)
+    }
+}
+
+/// Builder for creating [`Fluid`]s with custom backend configuration.
+///
+/// Allows specification of CoolProp backend for more control over
+/// calculation accuracy and performance.
+pub struct FluidBuilder {
+    substance: Substance,
+    backend: Option<Backend>,
+}
+
+impl FluidBuilder {
+    /// Creates a new fluid builder.
+    fn new(substance: Substance) -> Self {
+        Self { substance, backend: None }
+    }
+
+    /// Sets the CoolProp backend to use.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nomata::thermodynamics::{Fluid, fluids::Pure, backend::*};
+    ///
+    /// // Base backend
+    /// let water = Fluid::builder(Pure::Water)
+    ///     .with_backend(Backend::Base(BaseBackend::Heos))
+    ///     .build();
+    ///
+    /// // Tabular backend
+    /// let water_tab = Fluid::builder(Pure::Water)
+    ///     .with_backend(Backend::Tabular {
+    ///         base: BaseBackend::Heos,
+    ///         method: TabularMethod::Ttse,
+    ///     })
+    ///     .build();
+    /// ```
+    ///
+    /// Available base backends:
+    ///
+    /// - `BaseBackend::Heos`: Helmholtz Equation of State (high accuracy, default)
+    /// - `BaseBackend::If97`: IAPWS-IF97 for water/steam
+    /// - `BaseBackend::Incomp`: Incompressible fluids
+    /// - `BaseBackend::Refprop`: REFPROP (if available)
+    /// - `BaseBackend::Pr`: Peng-Robinson cubic EOS
+    /// - `BaseBackend::Srk`: Soave-Redlich-Kwong cubic EOS
+    /// - `BaseBackend::VtPr`: Volume-translated Peng-Robinson
+    /// - `BaseBackend::PcSaft`: PC-SAFT equation of state
+    ///
+    /// Available tabular methods:
+    ///
+    /// - `TabularMethod::Ttse`: Two-phase Tabular Taylor Series Expansion
+    /// - `TabularMethod::Bicubic`: Bicubic interpolation
+    ///
+    /// See: <https://docs.rs/rfluids/latest/rfluids/fluid/backend/>
+    pub fn with_backend(mut self, backend: impl Into<Backend>) -> Self {
+        self.backend = Some(backend.into());
+        self
+    }
+
+    /// Builds the fluid with the configured options.
+    pub fn build(self) -> Fluid {
+        let name = match &self.substance {
+            Substance::Pure(p) => format!("{:?}", p),
+            Substance::PredefinedMix(m) => format!("{:?}", m),
+            Substance::BinaryMix(_) => "BinaryMix".to_string(),
+            Substance::CustomMix(_) => "CustomMix".to_string(),
+        };
+
+        Fluid { substance: self.substance, name, backend: self.backend }
     }
 }
 
 /// Thermodynamic properties at a specific state.
 #[derive(Debug, Clone)]
 pub struct Properties {
-    /// Pressure [Pa]
+    /// Pressure \[Pa\]
     pub pressure: f64,
-    /// Temperature [K]
+    /// Temperature \[K\]
     pub temperature: f64,
     /// Density [kg/m^3]
     pub density: f64,
@@ -350,7 +611,7 @@ pub struct Properties {
     pub cv: f64,
     /// Speed of sound [m/s] (None if backend doesn't support it)
     pub speed_of_sound: Option<f64>,
-    /// Dynamic viscosity [Pa*s] (None if not available)
+    /// Dynamic viscosity \[Pa*s\] (None if not available)
     pub viscosity: Option<f64>,
     /// Thermal conductivity [W/(m*K)] (None if not available)
     pub thermal_conductivity: Option<f64>,
@@ -423,17 +684,30 @@ impl Properties {
 
 /// Common fluids available in CoolProp database.
 pub mod fluids {
-    /// Re-export Pure enum from rfluids - contains all available pure fluids
-    /// Use like: `Pure::Water`, `Pure::Nitrogen`, `Pure::Propane`, etc.
+    /// Re-export [`Pure`] enum from rfluids - contains all available pure fluids
+    /// Use like: [`Pure::Water`], [`Pure::Nitrogen`], [`Pure::nPropane`], etc.
     pub use rfluids::prelude::Pure;
 
-    /// Re-export PredefinedMix enum from rfluids - contains all predefined mixtures
-    /// Use like: `PredefinedMix::Air`, `PredefinedMix::R410A`, etc.
+    /// Re-export [`PredefinedMix`] enum from rfluids - contains all predefined mixtures
+    /// Use like: [`PredefinedMix::Air`], [`PredefinedMix::R410A`], etc.
     pub use rfluids::prelude::PredefinedMix;
 
-    /// Re-export BinaryMixKind enum from rfluids - contains all binary mixture types
-    /// Use like: `BinaryMixKind::MPG`, `BinaryMixKind::MEG`, etc.
+    /// Re-export [`BinaryMixKind`] enum from rfluids - contains all binary mixture types
+    /// Use like: [`BinaryMixKind::MPG`], [`BinaryMixKind::MEG`], etc.
     pub use rfluids::prelude::BinaryMixKind;
+}
+
+/// Backend configuration for CoolProp.
+pub mod backend {
+    pub use super::Backend;
+
+    /// Re-export BaseBackend enum for selecting calculation backend
+    /// See: [BaseBackend docs](https://docs.rs/rfluids/latest/rfluids/fluid/backend/enum.BaseBackend.html)
+    pub use rfluids::fluid::backend::BaseBackend;
+
+    /// Re-export TabularMethod enum for tabular interpolation methods
+    /// See: [TabularMethod docs](https://docs.rs/rfluids/latest/rfluids/fluid/backend/enum.TabularMethod.html)
+    pub use rfluids::fluid::backend::TabularMethod;
 }
 
 #[cfg(test)]

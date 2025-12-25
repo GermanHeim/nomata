@@ -32,9 +32,9 @@ nomata = { version = "0.1.0", features = ["autodiff", "solvers", "thermodynamics
 
 Available features:
 
-- **`autodiff`**: Automatic differentiation for Jacobian computation using `num-dual`
-- **`solvers`**: Numerical solvers for DAE systems using `differential-equations`
-- **`thermodynamics`**: CoolProp bindings for thermodynamic properties
+- **`autodiff`**: Automatic differentiation for Jacobian computation using [`num-dual`](https://docs.rs/num-dual/latest/num_dual/)
+- **`solvers`**: Numerical solvers for DAE systems using [`differential-equations`](https://docs.rs/differential-equations/latest/differential_equations/)
+- **`thermodynamics`**: CoolProp bindings for thermodynamic properties using [`rfluids`](https://docs.rs/rfluids/latest/rfluids/)
 - **`all`**: Enable all features
 
 ## Core Concepts

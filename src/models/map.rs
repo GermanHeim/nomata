@@ -16,10 +16,44 @@
 //! ```
 
 use crate::{
-    Algebraic, ComponentMapping, EquationSystem, EquationTerm, HasPorts, MappingDirection,
+    Algebraic, ComponentMapping, EquationSystem, EquationVars, HasPorts, MappingDirection,
     MolarFlow, NamedPort, ResidualFunction, Stream, TimeDomain, UnitOp, Var, VariableRegistry,
 };
+use std::collections::HashMap;
 use std::marker::PhantomData;
+
+// Typed Equation Variable Structs (Generic over scalar type for autodiff)
+
+use crate::{EquationVarsGeneric, Scalar};
+
+/// Variables for temperature pass-through: T_out = T_in
+pub struct TempPassthroughVars<S: Scalar> {
+    pub t_out: S,
+    pub t_in: S,
+}
+
+impl<S: Scalar> EquationVarsGeneric<S> for TempPassthroughVars<S> {
+    fn base_names() -> &'static [&'static str] {
+        &["t_out", "t_in"]
+    }
+
+    fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
+        Some(Self {
+            t_out: *vars.get(&format!("{}_t_out", prefix))?,
+            t_in: *vars.get(&format!("{}_t_in", prefix))?,
+        })
+    }
+}
+
+impl EquationVars for TempPassthroughVars<f64> {
+    fn base_names() -> &'static [&'static str] {
+        <Self as EquationVarsGeneric<f64>>::base_names()
+    }
+
+    fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
+        <Self as EquationVarsGeneric<f64>>::from_map(vars, prefix)
+    }
+}
 
 /// Component Mapper unit operation (MAP).
 ///
@@ -224,59 +258,144 @@ impl<T: TimeDomain> HasPorts for MAP<T> {
 }
 
 /// UnitOp implementation for MAP.
+#[cfg(not(feature = "autodiff"))]
 impl<T: TimeDomain> UnitOp for MAP<T> {
     type In = Stream<MolarFlow>;
     type Out = Stream<MolarFlow>;
 
     fn build_equations<TD: TimeDomain>(&self, system: &mut EquationSystem<TD>, unit_name: &str) {
         // Temperature passes through unchanged
-        let mut temp_eq = ResidualFunction::new(&format!("{}_temperature", unit_name));
-        temp_eq.add_term(EquationTerm::new(1.0, "T_out"));
-        temp_eq.add_term(EquationTerm::new(-1.0, "T_in"));
+        let temp_eq = ResidualFunction::from_typed(
+            &format!("{}_temperature", unit_name),
+            unit_name,
+            |v: TempPassthroughVars<f64>| v.t_out - v.t_in,
+        );
         system.add_algebraic(temp_eq);
 
         match self.direction {
             MappingDirection::Lumping => {
                 // For each mapping: F_lumped = sum(F_detailed_i)
                 for mapping in &self.mappings {
-                    let mut lumping_eq = ResidualFunction::new(&format!(
-                        "{}_lump_{}",
-                        unit_name,
-                        mapping.lumped_component()
-                    ));
-                    // F_lumped
-                    lumping_eq.add_term(EquationTerm::new(
-                        1.0,
-                        &format!("F_out_{}", mapping.lumped_component()),
-                    ));
-                    // - sum(F_detailed_i)
-                    for (detailed_name, _) in mapping.detailed_components() {
-                        lumping_eq
-                            .add_term(EquationTerm::new(-1.0, &format!("F_in_{}", detailed_name)));
-                    }
+                    let lumped_name = mapping.lumped_component().to_string();
+                    let detailed_names: Vec<String> = mapping
+                        .detailed_components()
+                        .iter()
+                        .map(|(name, _)| format!("F_in_{}", name))
+                        .collect();
+                    let n_detailed = detailed_names.len();
 
+                    let mut vars = vec![format!("F_out_{}", lumped_name)];
+                    vars.extend(detailed_names);
+
+                    let lumping_eq = ResidualFunction::from_dynamic(
+                        &format!("{}_lump_{}", unit_name, lumped_name),
+                        vars,
+                        move |v, names| {
+                            let f_out = v.get(&names[0]).copied().unwrap_or(0.0);
+                            let sum_in: f64 = (1..=n_detailed)
+                                .map(|i| v.get(&names[i]).copied().unwrap_or(0.0))
+                                .sum();
+                            f_out - sum_in
+                        },
+                    );
                     system.add_algebraic(lumping_eq);
                 }
             }
             MappingDirection::Delumping => {
                 // For each detailed component: F_detailed_i = fraction_i * F_lumped
                 for mapping in &self.mappings {
+                    let lumped_name = mapping.lumped_component().to_string();
                     for (detailed_name, fraction) in mapping.detailed_components() {
-                        let mut delumping_eq = ResidualFunction::new(&format!(
-                            "{}_delump_{}_to_{}",
-                            unit_name,
-                            mapping.lumped_component(),
-                            detailed_name
-                        ));
-                        // F_detailed_i
-                        delumping_eq
-                            .add_term(EquationTerm::new(1.0, &format!("F_out_{}", detailed_name)));
-                        // - fraction_i * F_lumped
-                        delumping_eq.add_term(EquationTerm::new(
-                            -fraction,
-                            &format!("F_in_{}", mapping.lumped_component()),
-                        ));
+                        let frac = *fraction;
+                        let vars = vec![
+                            format!("F_out_{}", detailed_name),
+                            format!("F_in_{}", lumped_name),
+                        ];
+                        let delumping_eq = ResidualFunction::from_dynamic(
+                            &format!("{}_delump_{}_to_{}", unit_name, lumped_name, detailed_name),
+                            vars,
+                            move |v, names| {
+                                let f_out = v.get(&names[0]).copied().unwrap_or(0.0);
+                                let f_in = v.get(&names[1]).copied().unwrap_or(0.0);
+                                f_out - frac * f_in
+                            },
+                        );
+                        system.add_algebraic(delumping_eq);
+                    }
+                }
+            }
+        }
+    }
+}
 
+/// UnitOp implementation for MAP with autodiff support.
+#[cfg(feature = "autodiff")]
+impl<T: TimeDomain> UnitOp for MAP<T> {
+    type In = Stream<MolarFlow>;
+    type Out = Stream<MolarFlow>;
+
+    fn build_equations<TD: TimeDomain>(&self, system: &mut EquationSystem<TD>, unit_name: &str) {
+        use num_dual::Dual64;
+
+        // Temperature passes through unchanged
+        let temp_eq = ResidualFunction::from_typed_generic_with_dual(
+            &format!("{}_temperature", unit_name),
+            unit_name,
+            |v: TempPassthroughVars<f64>| v.t_out - v.t_in,
+            |v: TempPassthroughVars<Dual64>| v.t_out - v.t_in,
+        );
+        system.add_algebraic(temp_eq);
+
+        match self.direction {
+            MappingDirection::Lumping => {
+                // For each mapping: F_lumped = sum(F_detailed_i)
+                // (from_dynamic equations don't have autodiff support)
+                for mapping in &self.mappings {
+                    let lumped_name = mapping.lumped_component().to_string();
+                    let detailed_names: Vec<String> = mapping
+                        .detailed_components()
+                        .iter()
+                        .map(|(name, _)| format!("F_in_{}", name))
+                        .collect();
+                    let n_detailed = detailed_names.len();
+
+                    let mut vars = vec![format!("F_out_{}", lumped_name)];
+                    vars.extend(detailed_names);
+
+                    let lumping_eq = ResidualFunction::from_dynamic(
+                        &format!("{}_lump_{}", unit_name, lumped_name),
+                        vars,
+                        move |v, names| {
+                            let f_out = v.get(&names[0]).copied().unwrap_or(0.0);
+                            let sum_in: f64 = (1..=n_detailed)
+                                .map(|i| v.get(&names[i]).copied().unwrap_or(0.0))
+                                .sum();
+                            f_out - sum_in
+                        },
+                    );
+                    system.add_algebraic(lumping_eq);
+                }
+            }
+            MappingDirection::Delumping => {
+                // For each detailed component: F_detailed_i = fraction_i * F_lumped
+                // (from_dynamic equations don't have autodiff support)
+                for mapping in &self.mappings {
+                    let lumped_name = mapping.lumped_component().to_string();
+                    for (detailed_name, fraction) in mapping.detailed_components() {
+                        let frac = *fraction;
+                        let vars = vec![
+                            format!("F_out_{}", detailed_name),
+                            format!("F_in_{}", lumped_name),
+                        ];
+                        let delumping_eq = ResidualFunction::from_dynamic(
+                            &format!("{}_delump_{}_to_{}", unit_name, lumped_name, detailed_name),
+                            vars,
+                            move |v, names| {
+                                let f_out = v.get(&names[0]).copied().unwrap_or(0.0);
+                                let f_in = v.get(&names[1]).copied().unwrap_or(0.0);
+                                f_out - frac * f_in
+                            },
+                        );
                         system.add_algebraic(delumping_eq);
                     }
                 }

@@ -29,10 +29,172 @@
 //! ```
 
 use crate::*;
+use std::collections::HashMap;
 use std::marker::PhantomData;
 
 #[cfg(feature = "thermodynamics")]
 use crate::thermodynamics::fluids::Pure;
+
+// Typed Equation Variable Structs (Generic over scalar type for autodiff)
+
+use crate::{EquationVarsGeneric, Scalar};
+
+/// Variables for steady-state mass balance: 0 = F_in - V - L
+pub struct FlashMassBalanceVars<S: Scalar> {
+    pub f_in: S,
+    pub v: S,
+    pub l: S,
+}
+
+impl<S: Scalar> EquationVarsGeneric<S> for FlashMassBalanceVars<S> {
+    fn base_names() -> &'static [&'static str] {
+        &["f_in", "v", "l"]
+    }
+
+    fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
+        Some(Self {
+            f_in: *vars.get(&format!("{}_f_in", prefix))?,
+            v: *vars.get(&format!("{}_v", prefix))?,
+            l: *vars.get(&format!("{}_l", prefix))?,
+        })
+    }
+}
+
+impl EquationVars for FlashMassBalanceVars<f64> {
+    fn base_names() -> &'static [&'static str] {
+        <Self as EquationVarsGeneric<f64>>::base_names()
+    }
+
+    fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
+        <Self as EquationVarsGeneric<f64>>::from_map(vars, prefix)
+    }
+}
+
+/// Variables for steady-state energy balance: 0 = F_in*H_in - V*H_v - L*H_l
+pub struct FlashEnergyBalanceVars<S: Scalar> {
+    pub f_in_h_in: S,
+    pub v_h_v: S,
+    pub l_h_l: S,
+}
+
+impl<S: Scalar> EquationVarsGeneric<S> for FlashEnergyBalanceVars<S> {
+    fn base_names() -> &'static [&'static str] {
+        &["f_in_h_in", "v_h_v", "l_h_l"]
+    }
+
+    fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
+        Some(Self {
+            f_in_h_in: *vars.get(&format!("{}_f_in_h_in", prefix))?,
+            v_h_v: *vars.get(&format!("{}_v_h_v", prefix))?,
+            l_h_l: *vars.get(&format!("{}_l_h_l", prefix))?,
+        })
+    }
+}
+
+impl EquationVars for FlashEnergyBalanceVars<f64> {
+    fn base_names() -> &'static [&'static str] {
+        <Self as EquationVarsGeneric<f64>>::base_names()
+    }
+
+    fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
+        <Self as EquationVarsGeneric<f64>>::from_map(vars, prefix)
+    }
+}
+
+/// Variables for dynamic mass balance: dM/dt = F_in - V - L
+pub struct FlashDynMassBalanceVars<S: Scalar> {
+    pub dm_dt: S,
+    pub f_in: S,
+    pub v: S,
+    pub l: S,
+}
+
+impl<S: Scalar> EquationVarsGeneric<S> for FlashDynMassBalanceVars<S> {
+    fn base_names() -> &'static [&'static str] {
+        &["dm_dt", "f_in", "v", "l"]
+    }
+
+    fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
+        Some(Self {
+            dm_dt: *vars.get(&format!("{}_dm_dt", prefix))?,
+            f_in: *vars.get(&format!("{}_f_in", prefix))?,
+            v: *vars.get(&format!("{}_v", prefix))?,
+            l: *vars.get(&format!("{}_l", prefix))?,
+        })
+    }
+}
+
+impl EquationVars for FlashDynMassBalanceVars<f64> {
+    fn base_names() -> &'static [&'static str] {
+        <Self as EquationVarsGeneric<f64>>::base_names()
+    }
+
+    fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
+        <Self as EquationVarsGeneric<f64>>::from_map(vars, prefix)
+    }
+}
+
+/// Variables for dynamic energy balance: d(M*H)/dt = F_in*H_in - V*H_v - L*H_l
+pub struct FlashDynEnergyBalanceVars<S: Scalar> {
+    pub d_mh_dt: S,
+    pub f_in_h_in: S,
+    pub v_h_v: S,
+    pub l_h_l: S,
+}
+
+impl<S: Scalar> EquationVarsGeneric<S> for FlashDynEnergyBalanceVars<S> {
+    fn base_names() -> &'static [&'static str] {
+        &["d_mh_dt", "f_in_h_in", "v_h_v", "l_h_l"]
+    }
+
+    fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
+        Some(Self {
+            d_mh_dt: *vars.get(&format!("{}_d_mh_dt", prefix))?,
+            f_in_h_in: *vars.get(&format!("{}_f_in_h_in", prefix))?,
+            v_h_v: *vars.get(&format!("{}_v_h_v", prefix))?,
+            l_h_l: *vars.get(&format!("{}_l_h_l", prefix))?,
+        })
+    }
+}
+
+impl EquationVars for FlashDynEnergyBalanceVars<f64> {
+    fn base_names() -> &'static [&'static str] {
+        <Self as EquationVarsGeneric<f64>>::base_names()
+    }
+
+    fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
+        <Self as EquationVarsGeneric<f64>>::from_map(vars, prefix)
+    }
+}
+
+/// Variables for VLE equation: y_i = K_i * x_i
+pub struct VleVars<S: Scalar> {
+    pub y: S,
+    pub k_x: S,
+}
+
+impl<S: Scalar> EquationVarsGeneric<S> for VleVars<S> {
+    fn base_names() -> &'static [&'static str] {
+        &["y", "k_x"]
+    }
+
+    fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
+        Some(Self {
+            y: *vars.get(&format!("{}_y", prefix))?,
+            k_x: *vars.get(&format!("{}_k_x", prefix))?,
+        })
+    }
+}
+
+impl EquationVars for VleVars<f64> {
+    fn base_names() -> &'static [&'static str] {
+        <Self as EquationVarsGeneric<f64>>::base_names()
+    }
+
+    fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
+        <Self as EquationVarsGeneric<f64>>::from_map(vars, prefix)
+    }
+}
 
 /// Phantom type marker for uninitialized state.
 pub struct Uninitialized;
@@ -371,96 +533,285 @@ impl<E, S> HasPorts for FlashSeparator<E, S> {
 }
 
 /// UnitOp implementation for FlashSeparator.
+#[cfg(not(feature = "autodiff"))]
 impl<E, S> UnitOp for FlashSeparator<E, S> {
     type In = Stream<MolarFlow>;
     type Out = Stream<MolarFlow>;
 
     fn build_equations<T: TimeDomain>(&self, system: &mut EquationSystem<T>, unit_name: &str) {
+        let n_comp = self.n_components;
+
         if T::IS_STEADY {
             // Steady-state flash: no accumulation
             // Overall mass balance: 0 = F_in - V - L
-            let mut mass_balance = ResidualFunction::new(&format!("{}_mass_balance", unit_name));
-            mass_balance.add_term(EquationTerm::new(1.0, "F_in"));
-            mass_balance.add_term(EquationTerm::new(-1.0, "V"));
-            mass_balance.add_term(EquationTerm::new(-1.0, "L"));
+            let mass_balance = ResidualFunction::from_typed(
+                &format!("{}_mass_balance", unit_name),
+                unit_name,
+                |v: FlashMassBalanceVars<f64>| v.f_in - v.v - v.l,
+            );
             system.add_algebraic(mass_balance);
 
             // Component balances: 0 = F_in*z_i - V*y_i - L*x_i
-            for i in 0..self.n_components {
-                let mut comp_balance =
-                    ResidualFunction::new(&format!("{}_component_{}_balance", unit_name, i));
-                comp_balance.add_term(EquationTerm::new(1.0, &format!("F_in_z_{}", i)));
-                comp_balance.add_term(EquationTerm::new(-1.0, &format!("V_y_{}", i)));
-                comp_balance.add_term(EquationTerm::new(-1.0, &format!("L_x_{}", i)));
+            for i in 0..n_comp {
+                let vars =
+                    vec![format!("F_in_z_{}", i), format!("V_y_{}", i), format!("L_x_{}", i)];
+                let comp_balance = ResidualFunction::from_dynamic(
+                    &format!("{}_component_{}_balance", unit_name, i),
+                    vars,
+                    move |v, names| {
+                        let f_in_z = v.get(&names[0]).copied().unwrap_or(0.0);
+                        let v_y = v.get(&names[1]).copied().unwrap_or(0.0);
+                        let l_x = v.get(&names[2]).copied().unwrap_or(0.0);
+                        f_in_z - v_y - l_x
+                    },
+                );
                 system.add_algebraic(comp_balance);
             }
 
             // Energy balance: 0 = F_in*H_in - V*H_v - L*H_l
-            let mut energy_balance =
-                ResidualFunction::new(&format!("{}_energy_balance", unit_name));
-            energy_balance.add_term(EquationTerm::new(1.0, "F_in_H_in"));
-            energy_balance.add_term(EquationTerm::new(-1.0, "V_H_v"));
-            energy_balance.add_term(EquationTerm::new(-1.0, "L_H_l"));
+            let energy_balance = ResidualFunction::from_typed(
+                &format!("{}_energy_balance", unit_name),
+                unit_name,
+                |v: FlashEnergyBalanceVars<f64>| v.f_in_h_in - v.v_h_v - v.l_h_l,
+            );
             system.add_algebraic(energy_balance);
         } else {
             // Dynamic flash: include accumulation terms
             // Overall mass balance: dM/dt = F_in - V - L
-            let mut mass_balance = ResidualFunction::new(&format!("{}_mass_balance", unit_name));
-            mass_balance.add_term(EquationTerm::new(1.0, "dM_dt"));
-            mass_balance.add_term(EquationTerm::new(-1.0, "F_in"));
-            mass_balance.add_term(EquationTerm::new(1.0, "V"));
-            mass_balance.add_term(EquationTerm::new(1.0, "L"));
+            let mass_balance = ResidualFunction::from_typed(
+                &format!("{}_mass_balance", unit_name),
+                unit_name,
+                |v: FlashDynMassBalanceVars<f64>| v.dm_dt - v.f_in + v.v + v.l,
+            );
             system.add_differential(mass_balance);
 
             // Component balances: d(M*z_i)/dt = F_in*z_i - V*y_i - L*x_i
-            for i in 0..self.n_components {
-                let mut comp_balance =
-                    ResidualFunction::new(&format!("{}_component_{}_balance", unit_name, i));
-                comp_balance.add_term(EquationTerm::new(1.0, &format!("d_Mz_{}_dt", i)));
-                comp_balance.add_term(EquationTerm::new(-1.0, &format!("F_in_z_{}", i)));
-                comp_balance.add_term(EquationTerm::new(1.0, &format!("V_y_{}", i)));
-                comp_balance.add_term(EquationTerm::new(1.0, &format!("L_x_{}", i)));
+            for i in 0..n_comp {
+                let vars = vec![
+                    format!("d_Mz_{}_dt", i),
+                    format!("F_in_z_{}", i),
+                    format!("V_y_{}", i),
+                    format!("L_x_{}", i),
+                ];
+                let comp_balance = ResidualFunction::from_dynamic(
+                    &format!("{}_component_{}_balance", unit_name, i),
+                    vars,
+                    move |v, names| {
+                        let d_mz_dt = v.get(&names[0]).copied().unwrap_or(0.0);
+                        let f_in_z = v.get(&names[1]).copied().unwrap_or(0.0);
+                        let v_y = v.get(&names[2]).copied().unwrap_or(0.0);
+                        let l_x = v.get(&names[3]).copied().unwrap_or(0.0);
+                        d_mz_dt - f_in_z + v_y + l_x
+                    },
+                );
                 system.add_differential(comp_balance);
             }
 
             // Energy balance: d(M*H)/dt = F_in*H_in - V*H_v - L*H_l
-            let mut energy_balance =
-                ResidualFunction::new(&format!("{}_energy_balance", unit_name));
-            energy_balance.add_term(EquationTerm::new(1.0, "d_MH_dt"));
-            energy_balance.add_term(EquationTerm::new(-1.0, "F_in_H_in"));
-            energy_balance.add_term(EquationTerm::new(1.0, "V_H_v"));
-            energy_balance.add_term(EquationTerm::new(1.0, "L_H_l"));
+            let energy_balance = ResidualFunction::from_typed(
+                &format!("{}_energy_balance", unit_name),
+                unit_name,
+                |v: FlashDynEnergyBalanceVars<f64>| v.d_mh_dt - v.f_in_h_in + v.v_h_v + v.l_h_l,
+            );
             system.add_differential(energy_balance);
         }
 
         // VLE equilibrium relations: y_i = K_i * x_i
-        for i in 0..self.n_components {
-            let mut vle = ResidualFunction::new(&format!("{}_vle_{}", unit_name, i));
-            vle.add_term(EquationTerm::new(1.0, &format!("y_{}", i)));
-            vle.add_term(EquationTerm::new(-1.0, &format!("K_{}_x_{}", i, i)));
+        for i in 0..n_comp {
+            let prefix = format!("{}_vle_{}", unit_name, i);
+            let vle = ResidualFunction::from_typed(
+                &format!("{}_vle_{}", unit_name, i),
+                &prefix,
+                |v: VleVars<f64>| v.y - v.k_x,
+            );
             system.add_algebraic(vle);
         }
 
         // Rachford-Rice equation: sum(z_i*(K_i - 1)/(1 + V_frac*(K_i - 1))) = 0
-        let mut rachford_rice = ResidualFunction::new(&format!("{}_rachford_rice", unit_name));
-        for i in 0..self.n_components {
-            rachford_rice.add_term(EquationTerm::new(1.0, &format!("z_{}_K_term_{}", i, i)));
-        }
+        let rr_vars: Vec<String> = (0..n_comp).map(|i| format!("z_{}_K_term_{}", i, i)).collect();
+        let rachford_rice = ResidualFunction::from_dynamic(
+            &format!("{}_rachford_rice", unit_name),
+            rr_vars,
+            move |v, names| names.iter().map(|n| v.get(n).copied().unwrap_or(0.0)).sum(),
+        );
         system.add_algebraic(rachford_rice);
 
-        // Summation constraints
-        let mut x_sum = ResidualFunction::new(&format!("{}_x_sum", unit_name));
-        for i in 0..self.n_components {
-            x_sum.add_term(EquationTerm::new(1.0, &format!("x_{}", i)));
-        }
-        x_sum.add_term(EquationTerm::new(-1.0, "one"));
+        // Summation constraints: sum(x_i) = 1
+        let mut x_vars: Vec<String> = (0..n_comp).map(|i| format!("x_{}", i)).collect();
+        x_vars.push("one".to_string());
+        let x_sum = ResidualFunction::from_dynamic(
+            &format!("{}_x_sum", unit_name),
+            x_vars,
+            move |v, names| {
+                let sum: f64 =
+                    names[..n_comp].iter().map(|n| v.get(n).copied().unwrap_or(0.0)).sum();
+                let one = v.get(&names[n_comp]).copied().unwrap_or(1.0);
+                sum - one
+            },
+        );
         system.add_algebraic(x_sum);
 
-        let mut y_sum = ResidualFunction::new(&format!("{}_y_sum", unit_name));
-        for i in 0..self.n_components {
-            y_sum.add_term(EquationTerm::new(1.0, &format!("y_{}", i)));
+        // Summation constraints: sum(y_i) = 1
+        let mut y_vars: Vec<String> = (0..n_comp).map(|i| format!("y_{}", i)).collect();
+        y_vars.push("one".to_string());
+        let y_sum = ResidualFunction::from_dynamic(
+            &format!("{}_y_sum", unit_name),
+            y_vars,
+            move |v, names| {
+                let sum: f64 =
+                    names[..n_comp].iter().map(|n| v.get(n).copied().unwrap_or(0.0)).sum();
+                let one = v.get(&names[n_comp]).copied().unwrap_or(1.0);
+                sum - one
+            },
+        );
+        system.add_algebraic(y_sum);
+    }
+}
+
+/// UnitOp implementation for FlashSeparator with autodiff support.
+#[cfg(feature = "autodiff")]
+impl<E, S> UnitOp for FlashSeparator<E, S> {
+    type In = Stream<MolarFlow>;
+    type Out = Stream<MolarFlow>;
+
+    fn build_equations<T: TimeDomain>(&self, system: &mut EquationSystem<T>, unit_name: &str) {
+        use num_dual::Dual64;
+
+        let n_comp = self.n_components;
+
+        if T::IS_STEADY {
+            // Steady-state flash: no accumulation
+            // Overall mass balance: 0 = F_in - V - L
+            let mass_balance = ResidualFunction::from_typed_generic_with_dual(
+                &format!("{}_mass_balance", unit_name),
+                unit_name,
+                |v: FlashMassBalanceVars<f64>| v.f_in - v.v - v.l,
+                |v: FlashMassBalanceVars<Dual64>| v.f_in - v.v - v.l,
+            );
+            system.add_algebraic(mass_balance);
+
+            // Component balances: 0 = F_in*z_i - V*y_i - L*x_i
+            // (from_dynamic equations don't have autodiff support)
+            for i in 0..n_comp {
+                let vars =
+                    vec![format!("F_in_z_{}", i), format!("V_y_{}", i), format!("L_x_{}", i)];
+                let comp_balance = ResidualFunction::from_dynamic(
+                    &format!("{}_component_{}_balance", unit_name, i),
+                    vars,
+                    move |v, names| {
+                        let f_in_z = v.get(&names[0]).copied().unwrap_or(0.0);
+                        let v_y = v.get(&names[1]).copied().unwrap_or(0.0);
+                        let l_x = v.get(&names[2]).copied().unwrap_or(0.0);
+                        f_in_z - v_y - l_x
+                    },
+                );
+                system.add_algebraic(comp_balance);
+            }
+
+            // Energy balance: 0 = F_in*H_in - V*H_v - L*H_l
+            let energy_balance = ResidualFunction::from_typed_generic_with_dual(
+                &format!("{}_energy_balance", unit_name),
+                unit_name,
+                |v: FlashEnergyBalanceVars<f64>| v.f_in_h_in - v.v_h_v - v.l_h_l,
+                |v: FlashEnergyBalanceVars<Dual64>| v.f_in_h_in - v.v_h_v - v.l_h_l,
+            );
+            system.add_algebraic(energy_balance);
+        } else {
+            // Dynamic flash: include accumulation terms
+            // Overall mass balance: dM/dt = F_in - V - L
+            let mass_balance = ResidualFunction::from_typed_generic_with_dual(
+                &format!("{}_mass_balance", unit_name),
+                unit_name,
+                |v: FlashDynMassBalanceVars<f64>| v.dm_dt - v.f_in + v.v + v.l,
+                |v: FlashDynMassBalanceVars<Dual64>| v.dm_dt - v.f_in + v.v + v.l,
+            );
+            system.add_differential(mass_balance);
+
+            // Component balances: d(M*z_i)/dt = F_in*z_i - V*y_i - L*x_i
+            // (from_dynamic equations don't have autodiff support)
+            for i in 0..n_comp {
+                let vars = vec![
+                    format!("d_Mz_{}_dt", i),
+                    format!("F_in_z_{}", i),
+                    format!("V_y_{}", i),
+                    format!("L_x_{}", i),
+                ];
+                let comp_balance = ResidualFunction::from_dynamic(
+                    &format!("{}_component_{}_balance", unit_name, i),
+                    vars,
+                    move |v, names| {
+                        let d_mz_dt = v.get(&names[0]).copied().unwrap_or(0.0);
+                        let f_in_z = v.get(&names[1]).copied().unwrap_or(0.0);
+                        let v_y = v.get(&names[2]).copied().unwrap_or(0.0);
+                        let l_x = v.get(&names[3]).copied().unwrap_or(0.0);
+                        d_mz_dt - f_in_z + v_y + l_x
+                    },
+                );
+                system.add_differential(comp_balance);
+            }
+
+            // Energy balance: d(M*H)/dt = F_in*H_in - V*H_v - L*H_l
+            let energy_balance = ResidualFunction::from_typed_generic_with_dual(
+                &format!("{}_energy_balance", unit_name),
+                unit_name,
+                |v: FlashDynEnergyBalanceVars<f64>| v.d_mh_dt - v.f_in_h_in + v.v_h_v + v.l_h_l,
+                |v: FlashDynEnergyBalanceVars<Dual64>| v.d_mh_dt - v.f_in_h_in + v.v_h_v + v.l_h_l,
+            );
+            system.add_differential(energy_balance);
         }
-        y_sum.add_term(EquationTerm::new(-1.0, "one"));
+
+        // VLE equilibrium relations: y_i = K_i * x_i
+        for i in 0..n_comp {
+            let prefix = format!("{}_vle_{}", unit_name, i);
+            let vle = ResidualFunction::from_typed_generic_with_dual(
+                &format!("{}_vle_{}", unit_name, i),
+                &prefix,
+                |v: VleVars<f64>| v.y - v.k_x,
+                |v: VleVars<Dual64>| v.y - v.k_x,
+            );
+            system.add_algebraic(vle);
+        }
+
+        // Rachford-Rice equation: sum(z_i*(K_i - 1)/(1 + V_frac*(K_i - 1))) = 0
+        // (from_dynamic equations don't have autodiff support)
+        let rr_vars: Vec<String> = (0..n_comp).map(|i| format!("z_{}_K_term_{}", i, i)).collect();
+        let rachford_rice = ResidualFunction::from_dynamic(
+            &format!("{}_rachford_rice", unit_name),
+            rr_vars,
+            move |v, names| names.iter().map(|n| v.get(n).copied().unwrap_or(0.0)).sum(),
+        );
+        system.add_algebraic(rachford_rice);
+
+        // Summation constraints: sum(x_i) = 1
+        // (from_dynamic equations don't have autodiff support)
+        let mut x_vars: Vec<String> = (0..n_comp).map(|i| format!("x_{}", i)).collect();
+        x_vars.push("one".to_string());
+        let x_sum = ResidualFunction::from_dynamic(
+            &format!("{}_x_sum", unit_name),
+            x_vars,
+            move |v, names| {
+                let sum: f64 =
+                    names[..n_comp].iter().map(|n| v.get(n).copied().unwrap_or(0.0)).sum();
+                let one = v.get(&names[n_comp]).copied().unwrap_or(1.0);
+                sum - one
+            },
+        );
+        system.add_algebraic(x_sum);
+
+        // Summation constraints: sum(y_i) = 1
+        // (from_dynamic equations don't have autodiff support)
+        let mut y_vars: Vec<String> = (0..n_comp).map(|i| format!("y_{}", i)).collect();
+        y_vars.push("one".to_string());
+        let y_sum = ResidualFunction::from_dynamic(
+            &format!("{}_y_sum", unit_name),
+            y_vars,
+            move |v, names| {
+                let sum: f64 =
+                    names[..n_comp].iter().map(|n| v.get(n).copied().unwrap_or(0.0)).sum();
+                let one = v.get(&names[n_comp]).copied().unwrap_or(1.0);
+                sum - one
+            },
+        );
         system.add_algebraic(y_sum);
     }
 }

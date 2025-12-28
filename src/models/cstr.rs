@@ -34,10 +34,307 @@
 //! ```
 
 use crate::*;
+use std::collections::HashMap;
 use std::marker::PhantomData;
 
 #[cfg(feature = "thermodynamics")]
 use crate::thermodynamics::{Fluid, fluids::Pure};
+
+// Typed Equation Variable Structs (Generic over scalar type for autodiff)
+
+use crate::{EquationVarsGeneric, Scalar};
+
+/// Variables for steady-state mass balance: F_in - F_out = 0
+pub struct SteadyMassBalanceVars<S: Scalar> {
+    pub f_in: S,
+    pub f_out: S,
+}
+
+impl<S: Scalar> EquationVarsGeneric<S> for SteadyMassBalanceVars<S> {
+    fn base_names() -> &'static [&'static str] {
+        &["F_in", "F_out"]
+    }
+
+    fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
+        Some(Self {
+            f_in: *vars.get(&format!("{}_F_in", prefix))?,
+            f_out: *vars.get(&format!("{}_F_out", prefix))?,
+        })
+    }
+}
+
+impl EquationVars for SteadyMassBalanceVars<f64> {
+    fn base_names() -> &'static [&'static str] {
+        <Self as EquationVarsGeneric<f64>>::base_names()
+    }
+
+    fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
+        <Self as EquationVarsGeneric<f64>>::from_map(vars, prefix)
+    }
+}
+
+/// Variables for steady-state component balance: F_in*C_in - F_out*C - V*r = 0
+pub struct SteadyComponentBalanceVars<S: Scalar> {
+    pub f_in: S,
+    pub c_in: S,
+    pub f_out: S,
+    pub c: S,
+    pub v: S,
+    pub r: S,
+}
+
+impl<S: Scalar> EquationVarsGeneric<S> for SteadyComponentBalanceVars<S> {
+    fn base_names() -> &'static [&'static str] {
+        &["F_in", "C_in", "F_out", "C", "V", "r"]
+    }
+
+    fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
+        Some(Self {
+            f_in: *vars.get(&format!("{}_F_in", prefix))?,
+            c_in: *vars.get(&format!("{}_C_in", prefix))?,
+            f_out: *vars.get(&format!("{}_F_out", prefix))?,
+            c: *vars.get(&format!("{}_C", prefix))?,
+            v: *vars.get(&format!("{}_V", prefix))?,
+            r: *vars.get(&format!("{}_r", prefix))?,
+        })
+    }
+}
+
+impl EquationVars for SteadyComponentBalanceVars<f64> {
+    fn base_names() -> &'static [&'static str] {
+        <Self as EquationVarsGeneric<f64>>::base_names()
+    }
+
+    fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
+        <Self as EquationVarsGeneric<f64>>::from_map(vars, prefix)
+    }
+}
+
+/// Variables for steady-state energy balance
+pub struct SteadyEnergyBalanceVars<S: Scalar> {
+    pub f_in: S,
+    pub f_out: S,
+    pub rho: S,
+    pub cp: S,
+    pub t_in: S,
+    pub t: S,
+    pub v: S,
+    pub r: S,
+    pub delta_h: S,
+    pub q: S,
+}
+
+impl<S: Scalar> EquationVarsGeneric<S> for SteadyEnergyBalanceVars<S> {
+    fn base_names() -> &'static [&'static str] {
+        &["F_in", "F_out", "rho", "Cp", "T_in", "T", "V", "r", "deltaH", "Q"]
+    }
+
+    fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
+        Some(Self {
+            f_in: *vars.get(&format!("{}_F_in", prefix))?,
+            f_out: *vars.get(&format!("{}_F_out", prefix))?,
+            rho: *vars.get(&format!("{}_rho", prefix))?,
+            cp: *vars.get(&format!("{}_Cp", prefix))?,
+            t_in: *vars.get(&format!("{}_T_in", prefix))?,
+            t: *vars.get(&format!("{}_T", prefix))?,
+            v: *vars.get(&format!("{}_V", prefix))?,
+            r: *vars.get(&format!("{}_r", prefix))?,
+            delta_h: *vars.get(&format!("{}_deltaH", prefix))?,
+            q: *vars.get(&format!("{}_Q", prefix))?,
+        })
+    }
+}
+
+impl EquationVars for SteadyEnergyBalanceVars<f64> {
+    fn base_names() -> &'static [&'static str] {
+        <Self as EquationVarsGeneric<f64>>::base_names()
+    }
+
+    fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
+        <Self as EquationVarsGeneric<f64>>::from_map(vars, prefix)
+    }
+}
+
+/// Variables for dynamic mass balance: dV/dt - (F_in - F_out) = 0
+pub struct DynamicMassBalanceVars<S: Scalar> {
+    pub dv_dt: S,
+    pub f_in: S,
+    pub f_out: S,
+}
+
+impl<S: Scalar> EquationVarsGeneric<S> for DynamicMassBalanceVars<S> {
+    fn base_names() -> &'static [&'static str] {
+        &["dV_dt", "F_in", "F_out"]
+    }
+
+    fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
+        Some(Self {
+            dv_dt: *vars.get(&format!("{}_dV_dt", prefix))?,
+            f_in: *vars.get(&format!("{}_F_in", prefix))?,
+            f_out: *vars.get(&format!("{}_F_out", prefix))?,
+        })
+    }
+}
+
+impl EquationVars for DynamicMassBalanceVars<f64> {
+    fn base_names() -> &'static [&'static str] {
+        <Self as EquationVarsGeneric<f64>>::base_names()
+    }
+
+    fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
+        <Self as EquationVarsGeneric<f64>>::from_map(vars, prefix)
+    }
+}
+
+/// Variables for dynamic component balance: d(V*C)/dt - (F_in*C_in - F_out*C - V*r) = 0
+pub struct DynamicComponentBalanceVars<S: Scalar> {
+    pub dvc_dt: S,
+    pub f_in: S,
+    pub c_in: S,
+    pub f_out: S,
+    pub c: S,
+    pub v: S,
+    pub r: S,
+}
+
+impl<S: Scalar> EquationVarsGeneric<S> for DynamicComponentBalanceVars<S> {
+    fn base_names() -> &'static [&'static str] {
+        &["dVC_dt", "F_in", "C_in", "F_out", "C", "V", "r"]
+    }
+
+    fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
+        Some(Self {
+            dvc_dt: *vars.get(&format!("{}_dVC_dt", prefix))?,
+            f_in: *vars.get(&format!("{}_F_in", prefix))?,
+            c_in: *vars.get(&format!("{}_C_in", prefix))?,
+            f_out: *vars.get(&format!("{}_F_out", prefix))?,
+            c: *vars.get(&format!("{}_C", prefix))?,
+            v: *vars.get(&format!("{}_V", prefix))?,
+            r: *vars.get(&format!("{}_r", prefix))?,
+        })
+    }
+}
+
+impl EquationVars for DynamicComponentBalanceVars<f64> {
+    fn base_names() -> &'static [&'static str] {
+        <Self as EquationVarsGeneric<f64>>::base_names()
+    }
+
+    fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
+        <Self as EquationVarsGeneric<f64>>::from_map(vars, prefix)
+    }
+}
+
+/// Variables for dynamic energy balance
+pub struct DynamicEnergyBalanceVars<S: Scalar> {
+    pub dvrhocpt_dt: S,
+    pub f_in: S,
+    pub f_out: S,
+    pub rho: S,
+    pub cp: S,
+    pub t_in: S,
+    pub t: S,
+    pub v: S,
+    pub r: S,
+    pub delta_h: S,
+    pub q: S,
+}
+
+impl<S: Scalar> EquationVarsGeneric<S> for DynamicEnergyBalanceVars<S> {
+    fn base_names() -> &'static [&'static str] {
+        &["dVrhoCpT_dt", "F_in", "F_out", "rho", "Cp", "T_in", "T", "V", "r", "deltaH", "Q"]
+    }
+
+    fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
+        Some(Self {
+            dvrhocpt_dt: *vars.get(&format!("{}_dVrhoCpT_dt", prefix))?,
+            f_in: *vars.get(&format!("{}_F_in", prefix))?,
+            f_out: *vars.get(&format!("{}_F_out", prefix))?,
+            rho: *vars.get(&format!("{}_rho", prefix))?,
+            cp: *vars.get(&format!("{}_Cp", prefix))?,
+            t_in: *vars.get(&format!("{}_T_in", prefix))?,
+            t: *vars.get(&format!("{}_T", prefix))?,
+            v: *vars.get(&format!("{}_V", prefix))?,
+            r: *vars.get(&format!("{}_r", prefix))?,
+            delta_h: *vars.get(&format!("{}_deltaH", prefix))?,
+            q: *vars.get(&format!("{}_Q", prefix))?,
+        })
+    }
+}
+
+impl EquationVars for DynamicEnergyBalanceVars<f64> {
+    fn base_names() -> &'static [&'static str] {
+        <Self as EquationVarsGeneric<f64>>::base_names()
+    }
+
+    fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
+        <Self as EquationVarsGeneric<f64>>::from_map(vars, prefix)
+    }
+}
+
+/// Variables for Arrhenius equation: k - k0*exp(-Ea/(R*T)) = 0
+pub struct ArrheniusVars<S: Scalar> {
+    pub k: S,
+    pub k0: S,
+    pub ea: S,
+    pub t: S,
+}
+
+impl<S: Scalar> EquationVarsGeneric<S> for ArrheniusVars<S> {
+    fn base_names() -> &'static [&'static str] {
+        &["k", "k0", "Ea", "T"]
+    }
+
+    fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
+        Some(Self {
+            k: *vars.get(&format!("{}_k", prefix))?,
+            k0: *vars.get(&format!("{}_k0", prefix))?,
+            ea: *vars.get(&format!("{}_Ea", prefix))?,
+            t: *vars.get(&format!("{}_T", prefix))?,
+        })
+    }
+}
+
+impl EquationVars for ArrheniusVars<f64> {
+    fn base_names() -> &'static [&'static str] {
+        <Self as EquationVarsGeneric<f64>>::base_names()
+    }
+
+    fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
+        <Self as EquationVarsGeneric<f64>>::from_map(vars, prefix)
+    }
+}
+
+/// Variables for reaction rate: r - k*C = 0
+pub struct ReactionRateVars<S: Scalar> {
+    pub r: S,
+    pub k: S,
+    pub c: S,
+}
+
+impl<S: Scalar> EquationVarsGeneric<S> for ReactionRateVars<S> {
+    fn base_names() -> &'static [&'static str] {
+        &["r", "k", "C"]
+    }
+
+    fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
+        Some(Self {
+            r: *vars.get(&format!("{}_r", prefix))?,
+            k: *vars.get(&format!("{}_k", prefix))?,
+            c: *vars.get(&format!("{}_C", prefix))?,
+        })
+    }
+}
+
+impl EquationVars for ReactionRateVars<f64> {
+    fn base_names() -> &'static [&'static str] {
+        <Self as EquationVarsGeneric<f64>>::base_names()
+    }
+
+    fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
+        <Self as EquationVarsGeneric<f64>>::from_map(vars, prefix)
+    }
+}
 
 /// Phantom type marker for uninitialized state.
 pub struct Uninitialized;
@@ -344,6 +641,7 @@ impl<K, T, P: crate::PortState> HasPorts for CSTR<K, T, P> {
 }
 
 /// UnitOp implementation with equation harvesting.
+#[cfg(not(feature = "autodiff"))]
 impl<K, Thermo, P: crate::PortState> UnitOp for CSTR<K, Thermo, P> {
     type In = Stream<MolarFlow>;
     type Out = Stream<MolarFlow>;
@@ -355,68 +653,202 @@ impl<K, Thermo, P: crate::PortState> UnitOp for CSTR<K, Thermo, P> {
 
         if T::IS_STEADY {
             // Steady-state mode: no accumulation terms
-            // Mass balance: 0 = F_in - F_out
-            let mut mass_balance = ResidualFunction::new(&format!("{}_mass_balance", unit_name));
-            mass_balance.add_term(EquationTerm::new(-1.0, "F_in")); // Inlet flow
-            mass_balance.add_term(EquationTerm::new(1.0, "F_out")); // Outlet flow
+
+            // Mass balance: F_in - F_out = 0
+            let mass_balance = ResidualFunction::from_typed(
+                &format!("{}_mass_balance", unit_name),
+                unit_name,
+                |v: SteadyMassBalanceVars<f64>| v.f_in - v.f_out,
+            );
             system.add_algebraic(mass_balance);
 
-            // Component balance: 0 = F_in*C_in - F_out*C - V*r
-            let mut component_balance =
-                ResidualFunction::new(&format!("{}_component_balance", unit_name));
-            component_balance.add_term(EquationTerm::new(-1.0, "F_in_Cin")); // Inlet
-            component_balance.add_term(EquationTerm::new(1.0, "F_out_C")); // Outlet
-            component_balance.add_term(EquationTerm::new(1.0, "V_r")); // Reaction
+            // Component balance: F_in * C_in - F_out * C - V * r = 0
+            let component_balance = ResidualFunction::from_typed(
+                &format!("{}_component_balance", unit_name),
+                unit_name,
+                |v: SteadyComponentBalanceVars<f64>| v.f_in * v.c_in - v.f_out * v.c - v.v * v.r,
+            );
             system.add_algebraic(component_balance);
 
-            // Energy balance: 0 = F_in*H_in - F_out*H + V*r*deltaH + Q
-            let mut energy_balance =
-                ResidualFunction::new(&format!("{}_energy_balance", unit_name));
-            energy_balance.add_term(EquationTerm::new(-1.0, "F_in_H_in")); // Inlet enthalpy
-            energy_balance.add_term(EquationTerm::new(1.0, "F_out_H")); // Outlet enthalpy
-            energy_balance.add_term(EquationTerm::new(-1.0, "V_r_dH")); // Heat of reaction
-            energy_balance.add_term(EquationTerm::new(-1.0, "Q")); // Heat duty
+            // Energy balance: F_in * rho * Cp * T_in - F_out * rho * Cp * T + V * r * (-deltaH) + Q = 0
+            let energy_balance = ResidualFunction::from_typed(
+                &format!("{}_energy_balance", unit_name),
+                unit_name,
+                |v: SteadyEnergyBalanceVars<f64>| {
+                    v.f_in * v.rho * v.cp * v.t_in - v.f_out * v.rho * v.cp * v.t
+                        + v.v * v.r * (-v.delta_h)
+                        + v.q
+                },
+            );
             system.add_algebraic(energy_balance);
         } else {
             // Dynamic mode: include accumulation terms
-            // Mass balance: dV/dt = F_in - F_out
-            let mut mass_balance = ResidualFunction::new(&format!("{}_mass_balance", unit_name));
-            mass_balance.add_term(EquationTerm::new(1.0, "dV_dt")); // Accumulation
-            mass_balance.add_term(EquationTerm::new(-1.0, "F_in")); // Inlet flow
-            mass_balance.add_term(EquationTerm::new(1.0, "F_out")); // Outlet flow
+
+            // Mass balance: dV/dt - (F_in - F_out) = 0
+            let mass_balance = ResidualFunction::from_typed(
+                &format!("{}_mass_balance", unit_name),
+                unit_name,
+                |v: DynamicMassBalanceVars<f64>| v.dv_dt - (v.f_in - v.f_out),
+            );
             system.add_differential(mass_balance);
 
-            // Component balance: d(V*C)/dt = F_in*C_in - F_out*C - V*r
-            let mut component_balance =
-                ResidualFunction::new(&format!("{}_component_balance", unit_name));
-            component_balance.add_term(EquationTerm::new(1.0, "d(VC)_dt")); // Accumulation
-            component_balance.add_term(EquationTerm::new(-1.0, "F_in_Cin")); // Inlet
-            component_balance.add_term(EquationTerm::new(1.0, "F_out_C")); // Outlet
-            component_balance.add_term(EquationTerm::new(1.0, "V_r")); // Reaction
+            // Component balance: d(V*C)/dt - (F_in * C_in - F_out * C - V * r) = 0
+            let component_balance = ResidualFunction::from_typed(
+                &format!("{}_component_balance", unit_name),
+                unit_name,
+                |v: DynamicComponentBalanceVars<f64>| {
+                    v.dvc_dt - (v.f_in * v.c_in - v.f_out * v.c - v.v * v.r)
+                },
+            );
             system.add_differential(component_balance);
 
-            // Energy balance: d(V*rho*Cp*T)/dt = F_in*H_in - F_out*H + V*r*deltaH + Q
-            let mut energy_balance =
-                ResidualFunction::new(&format!("{}_energy_balance", unit_name));
-            energy_balance.add_term(EquationTerm::new(1.0, "d(VrhoCP*T)_dt")); // Accumulation
-            energy_balance.add_term(EquationTerm::new(-1.0, "F_in_H_in")); // Inlet enthalpy
-            energy_balance.add_term(EquationTerm::new(1.0, "F_out_H")); // Outlet enthalpy
-            energy_balance.add_term(EquationTerm::new(-1.0, "V_r_dH")); // Heat of reaction
-            energy_balance.add_term(EquationTerm::new(-1.0, "Q")); // Heat duty
+            // Energy balance: d(V*rho*Cp*T)/dt - (F_in*rho*Cp*T_in - F_out*rho*Cp*T + V*r*(-deltaH) + Q) = 0
+            let energy_balance = ResidualFunction::from_typed(
+                &format!("{}_energy_balance", unit_name),
+                unit_name,
+                |v: DynamicEnergyBalanceVars<f64>| {
+                    v.dvrhocpt_dt
+                        - (v.f_in * v.rho * v.cp * v.t_in - v.f_out * v.rho * v.cp * v.t
+                            + v.v * v.r * (-v.delta_h)
+                            + v.q)
+                },
+            );
             system.add_differential(energy_balance);
         }
 
         // Algebraic equations (same for both modes)
-        // Rate constant (Arrhenius)
-        let mut arrhenius = ResidualFunction::new(&format!("{}_arrhenius", unit_name));
-        arrhenius.add_term(EquationTerm::new(1.0, "k")); // k
-        arrhenius.add_term(EquationTerm::new(-1.0, "k0_exp_Ea_RT")); // - k0*exp(-Ea/RT)
+
+        // Arrhenius equation: k - k0 * exp(-Ea / (R * T)) = 0
+        let arrhenius = ResidualFunction::from_typed(
+            &format!("{}_arrhenius", unit_name),
+            unit_name,
+            |v: ArrheniusVars<f64>| v.k - v.k0 * (-v.ea / (8.314 * v.t)).exp(),
+        );
         system.add_algebraic(arrhenius);
 
-        // Reaction rate
-        let mut rate_eq = ResidualFunction::new(&format!("{}_reaction_rate", unit_name));
-        rate_eq.add_term(EquationTerm::new(1.0, "r")); // r
-        rate_eq.add_term(EquationTerm::new(-1.0, "k_C")); // - k*C
+        // Reaction rate: r - k * C = 0 (first-order kinetics)
+        let rate_eq = ResidualFunction::from_typed(
+            &format!("{}_reaction_rate", unit_name),
+            unit_name,
+            |v: ReactionRateVars<f64>| v.r - v.k * v.c,
+        );
+        system.add_algebraic(rate_eq);
+    }
+}
+
+/// UnitOp implementation for CSTR with autodiff support.
+#[cfg(feature = "autodiff")]
+impl<K, Thermo, P: crate::PortState> UnitOp for CSTR<K, Thermo, P> {
+    type In = Stream<MolarFlow>;
+    type Out = Stream<MolarFlow>;
+
+    fn build_equations<T: TimeDomain>(&self, system: &mut EquationSystem<T>, unit_name: &str) {
+        use num_dual::{Dual64, DualNum};
+
+        // For a CSTR, we have balance equations that differ based on time domain:
+        // Dynamic: dV/dt = F_in - F_out, d(V*C)/dt = ..., d(V*rho*Cp*T)/dt = ...
+        // Steady:  0 = F_in - F_out, 0 = ..., 0 = ...
+
+        if T::IS_STEADY {
+            // Steady-state mode: no accumulation terms
+
+            // Mass balance: F_in - F_out = 0
+            let mass_balance = ResidualFunction::from_typed_generic_with_dual(
+                &format!("{}_mass_balance", unit_name),
+                unit_name,
+                |v: SteadyMassBalanceVars<f64>| v.f_in - v.f_out,
+                |v: SteadyMassBalanceVars<Dual64>| v.f_in - v.f_out,
+            );
+            system.add_algebraic(mass_balance);
+
+            // Component balance: F_in * C_in - F_out * C - V * r = 0
+            let component_balance = ResidualFunction::from_typed_generic_with_dual(
+                &format!("{}_component_balance", unit_name),
+                unit_name,
+                |v: SteadyComponentBalanceVars<f64>| v.f_in * v.c_in - v.f_out * v.c - v.v * v.r,
+                |v: SteadyComponentBalanceVars<Dual64>| v.f_in * v.c_in - v.f_out * v.c - v.v * v.r,
+            );
+            system.add_algebraic(component_balance);
+
+            // Energy balance: F_in * rho * Cp * T_in - F_out * rho * Cp * T + V * r * (-deltaH) + Q = 0
+            let energy_balance = ResidualFunction::from_typed_generic_with_dual(
+                &format!("{}_energy_balance", unit_name),
+                unit_name,
+                |v: SteadyEnergyBalanceVars<f64>| {
+                    v.f_in * v.rho * v.cp * v.t_in - v.f_out * v.rho * v.cp * v.t
+                        + v.v * v.r * (-v.delta_h)
+                        + v.q
+                },
+                |v: SteadyEnergyBalanceVars<Dual64>| {
+                    v.f_in * v.rho * v.cp * v.t_in - v.f_out * v.rho * v.cp * v.t
+                        + v.v * v.r * (-v.delta_h)
+                        + v.q
+                },
+            );
+            system.add_algebraic(energy_balance);
+        } else {
+            // Dynamic mode: include accumulation terms
+
+            // Mass balance: dV/dt - (F_in - F_out) = 0
+            let mass_balance = ResidualFunction::from_typed_generic_with_dual(
+                &format!("{}_mass_balance", unit_name),
+                unit_name,
+                |v: DynamicMassBalanceVars<f64>| v.dv_dt - (v.f_in - v.f_out),
+                |v: DynamicMassBalanceVars<Dual64>| v.dv_dt - (v.f_in - v.f_out),
+            );
+            system.add_differential(mass_balance);
+
+            // Component balance: d(V*C)/dt - (F_in * C_in - F_out * C - V * r) = 0
+            let component_balance = ResidualFunction::from_typed_generic_with_dual(
+                &format!("{}_component_balance", unit_name),
+                unit_name,
+                |v: DynamicComponentBalanceVars<f64>| {
+                    v.dvc_dt - (v.f_in * v.c_in - v.f_out * v.c - v.v * v.r)
+                },
+                |v: DynamicComponentBalanceVars<Dual64>| {
+                    v.dvc_dt - (v.f_in * v.c_in - v.f_out * v.c - v.v * v.r)
+                },
+            );
+            system.add_differential(component_balance);
+
+            // Energy balance: d(V*rho*Cp*T)/dt - (F_in*rho*Cp*T_in - F_out*rho*Cp*T + V*r*(-deltaH) + Q) = 0
+            let energy_balance = ResidualFunction::from_typed_generic_with_dual(
+                &format!("{}_energy_balance", unit_name),
+                unit_name,
+                |v: DynamicEnergyBalanceVars<f64>| {
+                    v.dvrhocpt_dt
+                        - (v.f_in * v.rho * v.cp * v.t_in - v.f_out * v.rho * v.cp * v.t
+                            + v.v * v.r * (-v.delta_h)
+                            + v.q)
+                },
+                |v: DynamicEnergyBalanceVars<Dual64>| {
+                    v.dvrhocpt_dt
+                        - (v.f_in * v.rho * v.cp * v.t_in - v.f_out * v.rho * v.cp * v.t
+                            + v.v * v.r * (-v.delta_h)
+                            + v.q)
+                },
+            );
+            system.add_differential(energy_balance);
+        }
+
+        // Algebraic equations (same for both modes)
+
+        // Arrhenius equation: k - k0 * exp(-Ea / (R * T)) = 0
+        let arrhenius = ResidualFunction::from_typed_generic_with_dual(
+            &format!("{}_arrhenius", unit_name),
+            unit_name,
+            |v: ArrheniusVars<f64>| v.k - v.k0 * (-v.ea / (8.314 * v.t)).exp(),
+            |v: ArrheniusVars<Dual64>| v.k - v.k0 * (-v.ea / (Dual64::from(8.314) * v.t)).exp(),
+        );
+        system.add_algebraic(arrhenius);
+
+        // Reaction rate: r - k * C = 0 (first-order kinetics)
+        let rate_eq = ResidualFunction::from_typed_generic_with_dual(
+            &format!("{}_reaction_rate", unit_name),
+            unit_name,
+            |v: ReactionRateVars<f64>| v.r - v.k * v.c,
+            |v: ReactionRateVars<Dual64>| v.r - v.k * v.c,
+        );
         system.add_algebraic(rate_eq);
     }
 }

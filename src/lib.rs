@@ -59,7 +59,6 @@ use std::rc::Rc;
 
 // Core modules
 pub mod models;
-pub mod recycle;
 
 // Optional feature modules
 #[cfg(feature = "autodiff")]
@@ -501,9 +500,9 @@ pub struct Stream<S: StreamType, C = InitializedConditions> {
     pub composition: Vec<f64>,
     /// Component names or identifiers
     pub components: Vec<String>,
-    /// Temperature [K]
+    /// Temperature \[K\]
     pub temperature: f64,
-    /// Pressure [Pa]
+    /// Pressure \[Pa\]
     pub pressure: f64,
     /// Phantom data to carry the stream type
     _stream_type: PhantomData<S>,
@@ -685,7 +684,7 @@ impl<S: StreamType> Stream<S, InitializedConditions> {
     ///
     /// # Returns
     ///
-    /// Component flow = total_flow * composition[index]
+    /// Component flow = total_flow * composition\[index\]
     pub fn component_flow(&self, index: usize) -> f64 {
         self.total_flow * self.composition[index]
     }
@@ -1414,7 +1413,7 @@ impl ComponentMapping {
 ///
 /// The mapper conserves total mass/moles:
 /// - **Lumping**: F_lumped = Σ(F_detailed_i)
-/// - **Delumping**: F_detailed_i = fraction_i × F_lumped
+/// - **Delumping**: F_detailed_i = fraction_i * F_lumped
 ///
 /// # Examples
 ///
@@ -1560,41 +1559,48 @@ impl<T: TimeDomain> UnitOp for ComponentMapper<T> {
             MappingDirection::Lumping => {
                 // For each mapping: F_lumped = Σ(F_detailed_i)
                 for mapping in self.mappings.iter() {
-                    let mut lumping_eq = ResidualFunction::new(&format!(
-                        "{}_lump_{}",
-                        unit_name,
-                        mapping.lumped_component()
-                    ));
-                    lumping_eq.add_term(EquationTerm::new(
-                        1.0,
-                        &format!("F_{}", mapping.lumped_component()),
-                    ));
+                    let lumped_name = mapping.lumped_component().to_string();
+                    let detailed_names: Vec<String> = mapping
+                        .detailed_components()
+                        .iter()
+                        .map(|(name, _)| format!("F_{}", name))
+                        .collect();
+                    let n_detailed = detailed_names.len();
 
-                    for (detailed_name, _) in mapping.detailed_components() {
-                        lumping_eq
-                            .add_term(EquationTerm::new(-1.0, &format!("F_{}", detailed_name)));
-                    }
+                    let mut vars = vec![format!("F_{}", lumped_name)];
+                    vars.extend(detailed_names);
 
+                    let lumping_eq = ResidualFunction::from_dynamic(
+                        &format!("{}_lump_{}", unit_name, lumped_name),
+                        vars,
+                        move |v, names| {
+                            let f_lumped = v.get(&names[0]).copied().unwrap_or(0.0);
+                            let sum_detailed: f64 = (1..=n_detailed)
+                                .map(|i| v.get(&names[i]).copied().unwrap_or(0.0))
+                                .sum();
+                            f_lumped - sum_detailed
+                        },
+                    );
                     system.add_algebraic(lumping_eq);
                 }
             }
             MappingDirection::Delumping => {
-                // For each mapping and detailed component: F_detailed_i = fraction_i × F_lumped
+                // For each mapping and detailed component: F_detailed_i = fraction_i * F_lumped
                 for mapping in &self.mappings {
+                    let lumped_name = mapping.lumped_component().to_string();
                     for (detailed_name, fraction) in mapping.detailed_components() {
-                        let mut delumping_eq = ResidualFunction::new(&format!(
-                            "{}_delump_{}_to_{}",
-                            unit_name,
-                            mapping.lumped_component(),
-                            detailed_name
-                        ));
-                        delumping_eq
-                            .add_term(EquationTerm::new(1.0, &format!("F_{}", detailed_name)));
-                        delumping_eq.add_term(EquationTerm::new(
-                            -fraction,
-                            &format!("F_{}", mapping.lumped_component()),
-                        ));
-
+                        let frac = *fraction;
+                        let vars =
+                            vec![format!("F_{}", detailed_name), format!("F_{}", lumped_name)];
+                        let delumping_eq = ResidualFunction::from_dynamic(
+                            &format!("{}_delump_{}_to_{}", unit_name, lumped_name, detailed_name),
+                            vars,
+                            move |v, names| {
+                                let f_detailed = v.get(&names[0]).copied().unwrap_or(0.0);
+                                let f_lumped = v.get(&names[1]).copied().unwrap_or(0.0);
+                                f_detailed - frac * f_lumped
+                            },
+                        );
                         system.add_algebraic(delumping_eq);
                     }
                 }
@@ -1810,33 +1816,65 @@ impl<T: TimeDomain> UnitOp for Module<T> {
         // This enables hierarchical modeling where modules act as black-box
         // unit operations in a larger flowsheet.
 
+        let prefix = unit_name.to_string();
+
         // Copy all differential equations from internal flowsheet
         for eq in self.flowsheet.equation_system.differential_equations() {
-            let mut renamed_eq = ResidualFunction::new(&format!("{}_{}", unit_name, eq.name()));
+            let original_vars = eq.variable_names();
+            let renamed_vars: Vec<String> =
+                original_vars.iter().map(|v| format!("{}_{}", prefix, v)).collect();
 
-            // Copy all terms with their coefficients and variable names
-            for term in eq.terms() {
-                renamed_eq.add_term(EquationTerm::new(
-                    term.coefficient(),
-                    &format!("{}_{}", unit_name, term.variable_name()),
-                ));
-            }
+            // Create a mapping closure that remaps variable names
+            let old_vars = original_vars.clone();
+            let new_prefix = prefix.clone();
+            let inner_fn = eq.clone_eval_fn();
 
+            let renamed_eq = ResidualFunction::from_dynamic(
+                &format!("{}_{}", prefix, eq.name()),
+                renamed_vars,
+                move |var_values, _names| {
+                    // Remap variable names: parent_unit_var -> var
+                    let mut remapped: std::collections::HashMap<String, f64> =
+                        std::collections::HashMap::new();
+                    for old_var in &old_vars {
+                        let new_var = format!("{}_{}", new_prefix, old_var);
+                        if let Some(&val) = var_values.get(&new_var) {
+                            remapped.insert(old_var.clone(), val);
+                        }
+                    }
+                    inner_fn(&remapped)
+                },
+            );
             system.add_differential(renamed_eq);
         }
 
         // Copy all algebraic equations from internal flowsheet
         for eq in self.flowsheet.equation_system.algebraic_equations() {
-            let mut renamed_eq = ResidualFunction::new(&format!("{}_{}", unit_name, eq.name()));
+            let original_vars = eq.variable_names();
+            let renamed_vars: Vec<String> =
+                original_vars.iter().map(|v| format!("{}_{}", prefix, v)).collect();
 
-            // Copy all terms with their coefficients and variable names
-            for term in eq.terms() {
-                renamed_eq.add_term(EquationTerm::new(
-                    term.coefficient(),
-                    &format!("{}_{}", unit_name, term.variable_name()),
-                ));
-            }
+            // Create a mapping closure that remaps variable names
+            let old_vars = original_vars.clone();
+            let new_prefix = prefix.clone();
+            let inner_fn = eq.clone_eval_fn();
 
+            let renamed_eq = ResidualFunction::from_dynamic(
+                &format!("{}_{}", prefix, eq.name()),
+                renamed_vars,
+                move |var_values, _names| {
+                    // Remap variable names: parent_unit_var -> var
+                    let mut remapped: std::collections::HashMap<String, f64> =
+                        std::collections::HashMap::new();
+                    for old_var in &old_vars {
+                        let new_var = format!("{}_{}", new_prefix, old_var);
+                        if let Some(&val) = var_values.get(&new_var) {
+                            remapped.insert(old_var.clone(), val);
+                        }
+                    }
+                    inner_fn(&remapped)
+                },
+            );
             system.add_algebraic(renamed_eq);
         }
 
@@ -1885,25 +1923,6 @@ pub trait UnitOp {
     ///
     /// * `system` - The equation system to populate
     /// * `unit_name` - A unique name for this unit instance (for equation naming)
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// impl<P: PortState> UnitOp for CSTR<P> {
-    ///     fn build_equations(&self, system: &mut EquationSystem<Dynamic>, unit_name: &str) {
-    ///         // Mass balance: dC/dt = (F_in * C_in - F_out * C) / V - r
-    ///         let mut mass_balance = ResidualFunction::new(&format!("{}_mass", unit_name));
-    ///         mass_balance.add_term(EquationTerm::new(1.0, "accumulation"));
-    ///         mass_balance.add_term(EquationTerm::new(-1.0, "in_flow"));
-    ///         mass_balance.add_term(EquationTerm::new(1.0, "out_flow"));
-    ///         mass_balance.add_term(EquationTerm::new(1.0, "reaction"));
-    ///         system.add_differential(mass_balance);
-    ///         
-    ///         // Energy balance: ...
-    ///         // Kinetic rate: ...
-    ///     }
-    /// }
-    /// ```
     fn build_equations<T: TimeDomain>(&self, system: &mut EquationSystem<T>, unit_name: &str);
 }
 
@@ -3020,85 +3039,180 @@ impl<B: BalanceType> Equation<B> {
     }
 }
 
-/// Represents a term in a balance equation.
+/// Closure-Based Residual Functions
 ///
-/// Balance equations are composed of multiple terms (accumulation, flow in,
-/// flow out, generation, consumption).
-#[derive(Debug, Clone)]
-pub struct EquationTerm {
-    /// Coefficient multiplying the term
-    pub coefficient: f64,
-    /// Description of what this term represents
-    pub description: String,
+/// Type alias for residual evaluation functions.
+///
+/// A residual function takes a variable name -> value mapping and returns
+/// the residual value (should be zero at solution).
+pub type ResidualFn =
+    std::sync::Arc<dyn Fn(&std::collections::HashMap<String, f64>) -> f64 + Send + Sync>;
+
+/// Type alias for dual-number residual evaluation functions (autodiff support).
+#[cfg(feature = "autodiff")]
+pub type DualResidualFn = std::sync::Arc<
+    dyn Fn(&std::collections::HashMap<String, num_dual::Dual64>) -> num_dual::Dual64 + Send + Sync,
+>;
+
+/// Trait for scalar types that can be used in equation computations.
+///
+/// This trait is implemented for `f64` and `Dual64` (when autodiff is enabled),
+/// allowing the same equation struct and closure to work with both types.
+///
+/// When the `autodiff` feature is enabled, this trait uses `num_dual::DualNum<f64>`
+/// as a supertrait, which provides all mathematical operations automatically.
+///
+/// # Example
+///
+/// ```
+/// use nomata::Scalar;
+///
+/// fn compute_residual<S: Scalar>(f_in: S, f_out: S) -> S {
+///     f_in - f_out
+/// }
+///
+/// let result = compute_residual(100.0_f64, 50.0_f64);
+/// assert!((result - 50.0).abs() < 1e-10);
+/// ```
+#[cfg(feature = "autodiff")]
+pub trait Scalar: num_dual::DualNum<f64> + Copy + Send + Sync + 'static {}
+
+#[cfg(feature = "autodiff")]
+impl<T: num_dual::DualNum<f64> + Copy + Send + Sync + 'static> Scalar for T {}
+
+/// Trait for scalar types that can be used in equation computations.
+///
+/// When the `autodiff` feature is disabled, this is a marker trait for f64.
+/// The Vars structs need this bound to compile, but math operations use
+/// f64's inherent methods directly.
+#[cfg(not(feature = "autodiff"))]
+pub trait Scalar:
+    Copy
+    + std::ops::Add<Output = Self>
+    + std::ops::Sub<Output = Self>
+    + std::ops::Mul<Output = Self>
+    + std::ops::Div<Output = Self>
+    + std::ops::Neg<Output = Self>
+    + From<f64>
+    + Send
+    + Sync
+    + 'static
+{
 }
 
-impl EquationTerm {
-    /// Creates a new equation term.
-    pub fn new(coefficient: f64, description: &str) -> Self {
-        EquationTerm { coefficient, description: description.to_string() }
-    }
+#[cfg(not(feature = "autodiff"))]
+impl Scalar for f64 {}
 
-    /// Evaluates the term given a variable value.
-    pub fn evaluate(&self, value: f64) -> f64 {
-        self.coefficient * value
-    }
+/// Trait for typed equation variable structs that work with any scalar type.
+///
+/// Implement this trait for equation variable structs that should support
+/// automatic differentiation. The struct should be generic over the scalar type.
+///
+/// # Example
+///
+/// ```
+/// use nomata::{EquationVarsGeneric, Scalar};
+/// use std::collections::HashMap;
+///
+/// struct MassBalanceVars<S: Scalar> {
+///     f_in: S,
+///     f_out: S,
+/// }
+///
+/// impl<S: Scalar> EquationVarsGeneric<S> for MassBalanceVars<S> {
+///     fn base_names() -> &'static [&'static str] {
+///         &["F_in", "F_out"]
+///     }
+///
+///     fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
+///         Some(Self {
+///             f_in: *vars.get(&format!("{}_F_in", prefix))?,
+///             f_out: *vars.get(&format!("{}_F_out", prefix))?,
+///         })
+///     }
+/// }
+/// ```
+pub trait EquationVarsGeneric<S: Scalar>: Sized {
+    /// Returns the base variable names (without prefix).
+    fn base_names() -> &'static [&'static str];
 
-    /// Gets the coefficient of this term.
-    pub fn coefficient(&self) -> f64 {
-        self.coefficient
-    }
-
-    /// Gets the variable name (description) for this term.
-    pub fn variable_name(&self) -> &str {
-        &self.description
-    }
+    /// Constructs the variable set from a HashMap using prefixed names.
+    fn from_map(vars: &std::collections::HashMap<String, S>, prefix: &str) -> Option<Self>;
 }
 
 /// A residual function for a differential-algebraic equation system.
 ///
-/// This represents the complete set of equations that must be satisfied.
-#[derive(Debug)]
+/// This represents a single equation that must be satisfied (residual = 0).
+/// Uses typed equation structs for compile-time safety.
+///
+/// # Example
+///
+/// ```
+/// use nomata::{ResidualFunction, EquationVars};
+/// use std::collections::HashMap;
+///
+/// struct MassBalanceVars {
+///     f_in: f64,
+///     f_out: f64,
+/// }
+///
+/// impl EquationVars for MassBalanceVars {
+///     fn base_names() -> &'static [&'static str] {
+///         &["F_in", "F_out"]
+///     }
+///     fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
+///         Some(Self {
+///             f_in: *vars.get(&format!("{}_F_in", prefix))?,
+///             f_out: *vars.get(&format!("{}_F_out", prefix))?,
+///         })
+///     }
+/// }
+///
+/// let mass_balance = ResidualFunction::from_typed(
+///     "mass_balance",
+///     "unit",
+///     |v: MassBalanceVars| v.f_in - v.f_out,
+/// );
+/// ```
 pub struct ResidualFunction {
     /// Name of the residual function
     pub name: String,
-    /// Terms that make up the residual
-    terms: Vec<EquationTerm>,
+    /// Variables referenced by this function
+    variables: Vec<String>,
+    /// The evaluation closure (Arc for cloning)
+    eval_fn: ResidualFn,
+    /// Dual-number evaluation closure for automatic differentiation
+    #[cfg(feature = "autodiff")]
+    dual_eval_fn: Option<DualResidualFn>,
+}
+
+impl std::fmt::Debug for ResidualFunction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResidualFunction")
+            .field("name", &self.name)
+            .field("variables", &self.variables)
+            .field("eval_fn", &"<closure>")
+            .finish()
+    }
 }
 
 impl ResidualFunction {
-    /// Creates a new residual function.
+    /// Evaluates the residual using a variable name -> value mapping.
     ///
-    /// # Examples
+    /// # Arguments
     ///
-    /// ```
-    /// use nomata::ResidualFunction;
+    /// * `var_values` - HashMap from variable name to current value
     ///
-    /// let residual = ResidualFunction::new("cstr_mass_balance");
-    /// ```
-    pub fn new(name: &str) -> Self {
-        ResidualFunction { name: name.to_string(), terms: Vec::new() }
+    /// # Returns
+    ///
+    /// The computed residual value (should be zero at solution).
+    pub fn evaluate(&self, var_values: &std::collections::HashMap<String, f64>) -> f64 {
+        (self.eval_fn)(var_values)
     }
 
-    /// Adds a term to the residual function.
-    pub fn add_term(&mut self, term: EquationTerm) {
-        self.terms.push(term);
-    }
-
-    /// Evaluates the residual given variable values.
-    ///
-    /// Returns the sum of all terms evaluated with their respective values.
-    pub fn evaluate(&self, values: &[f64]) -> f64 {
-        if values.len() != self.terms.len() {
-            // In a real implementation, this would be an error
-            return 0.0;
-        }
-
-        self.terms.iter().zip(values.iter()).map(|(term, &value)| term.evaluate(value)).sum()
-    }
-
-    /// Gets the number of terms in the residual.
-    pub fn term_count(&self) -> usize {
-        self.terms.len()
+    /// Gets all variable names referenced by this residual function.
+    pub fn variable_names(&self) -> Vec<String> {
+        self.variables.clone()
     }
 
     /// Gets the name of this residual function.
@@ -3106,22 +3220,470 @@ impl ResidualFunction {
         &self.name
     }
 
-    /// Gets an iterator over the terms in this residual function.
-    pub fn terms(&self) -> impl Iterator<Item = &EquationTerm> {
-        self.terms.iter()
+    /// Clones the evaluation function (for use in Module hierarchies).
+    ///
+    /// This allows creating a new ResidualFunction that wraps the same
+    /// underlying closure with variable renaming.
+    pub fn clone_eval_fn(&self) -> ResidualFn {
+        self.eval_fn.clone()
     }
+
+    /// Creates a residual function from a typed equation struct.
+    ///
+    /// This provides compile-time type safety for equation variables.
+    /// The struct must implement `EquationVars` which defines the
+    /// variable names and how to construct the struct from a HashMap.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Name for the residual (for debugging/display)
+    /// * `prefix` - Prefix to prepend to variable names (e.g., unit name)
+    /// * `f` - Function that computes the residual given the typed variables
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use nomata::{ResidualFunction, EquationVars};
+    /// use std::collections::HashMap;
+    ///
+    /// // Define typed variables for mass balance
+    /// struct MassBalanceVars {
+    ///     f_in: f64,
+    ///     f_out: f64,
+    /// }
+    ///
+    /// impl EquationVars for MassBalanceVars {
+    ///     fn base_names() -> &'static [&'static str] {
+    ///         &["F_in", "F_out"]
+    ///     }
+    ///
+    ///     fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
+    ///         Some(Self {
+    ///             f_in: *vars.get(&format!("{}_F_in", prefix))?,
+    ///             f_out: *vars.get(&format!("{}_F_out", prefix))?,
+    ///         })
+    ///     }
+    /// }
+    ///
+    /// // Create type-safe residual function
+    /// let mass_balance = ResidualFunction::from_typed(
+    ///     "reactor_mass_balance",
+    ///     "reactor",
+    ///     |v: MassBalanceVars| v.f_in - v.f_out,
+    /// );
+    /// ```
+    #[cfg(not(feature = "autodiff"))]
+    pub fn from_typed<V, F>(name: &str, prefix: &str, f: F) -> Self
+    where
+        V: EquationVars,
+        F: Fn(V) -> f64 + Send + Sync + 'static,
+    {
+        let var_names: Vec<String> =
+            V::base_names().iter().map(|n| format!("{}_{}", prefix, n)).collect();
+
+        let prefix_owned = prefix.to_string();
+        ResidualFunction {
+            name: name.to_string(),
+            variables: var_names,
+            eval_fn: std::sync::Arc::new(move |vars| {
+                V::from_map(vars, &prefix_owned).map(&f).unwrap_or(0.0)
+            }),
+        }
+    }
+
+    /// Creates a residual function from a typed equation struct (with autodiff support).
+    ///
+    /// When the `autodiff` feature is enabled, this stores both f64 and Dual64
+    /// evaluation closures to enable automatic differentiation for Jacobian computation.
+    #[cfg(feature = "autodiff")]
+    pub fn from_typed<V, F>(name: &str, prefix: &str, f: F) -> Self
+    where
+        V: EquationVars,
+        F: Fn(V) -> f64 + Send + Sync + 'static,
+    {
+        let var_names: Vec<String> =
+            V::base_names().iter().map(|n| format!("{}_{}", prefix, n)).collect();
+
+        let prefix_owned = prefix.to_string();
+        ResidualFunction {
+            name: name.to_string(),
+            variables: var_names,
+            eval_fn: std::sync::Arc::new(move |vars| {
+                V::from_map(vars, &prefix_owned).map(&f).unwrap_or(0.0)
+            }),
+            dual_eval_fn: None, // Use from_typed_autodiff for autodiff support
+        }
+    }
+
+    /// Creates a residual function with full autodiff support.
+    ///
+    /// This constructor takes separate closures for f64 and Dual64 evaluation,
+    /// enabling true automatic differentiation for Jacobian computation.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Name for the residual (for debugging/display)
+    /// * `prefix` - Prefix to prepend to variable names (e.g., unit name)
+    /// * `f` - Function that computes the residual with f64 variables
+    /// * `f_dual` - Function that computes the residual with Dual64 variables
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nomata::{ResidualFunction, EquationVars};
+    /// use num_dual::Dual64;
+    /// use std::collections::HashMap;
+    ///
+    /// // f64 version
+    /// struct MassBalanceVars { f_in: f64, f_out: f64 }
+    /// // Dual64 version  
+    /// struct MassBalanceVarsDual { f_in: Dual64, f_out: Dual64 }
+    ///
+    /// let mass_balance = ResidualFunction::from_typed_autodiff(
+    ///     "mass_balance",
+    ///     "unit",
+    ///     &["F_in", "F_out"],
+    ///     |vars: &HashMap<String, f64>, prefix: &str| {
+    ///         let f_in = vars.get(&format!("{}_F_in", prefix)).copied().unwrap_or(0.0);
+    ///         let f_out = vars.get(&format!("{}_F_out", prefix)).copied().unwrap_or(0.0);
+    ///         f_in - f_out
+    ///     },
+    ///     |vars: &HashMap<String, Dual64>, prefix: &str| {
+    ///         let zero = Dual64::from(0.0);
+    ///         let f_in = vars.get(&format!("{}_F_in", prefix)).copied().unwrap_or(zero);
+    ///         let f_out = vars.get(&format!("{}_F_out", prefix)).copied().unwrap_or(zero);
+    ///         f_in - f_out
+    ///     },
+    /// );
+    /// ```
+    #[cfg(feature = "autodiff")]
+    pub fn from_typed_autodiff<F, FDual>(
+        name: &str,
+        prefix: &str,
+        base_names: &[&str],
+        f: F,
+        f_dual: FDual,
+    ) -> Self
+    where
+        F: Fn(&std::collections::HashMap<String, f64>, &str) -> f64 + Send + Sync + 'static,
+        FDual: Fn(&std::collections::HashMap<String, num_dual::Dual64>, &str) -> num_dual::Dual64
+            + Send
+            + Sync
+            + 'static,
+    {
+        let var_names: Vec<String> =
+            base_names.iter().map(|n| format!("{}_{}", prefix, n)).collect();
+
+        let prefix_owned = prefix.to_string();
+        let prefix_dual = prefix.to_string();
+        ResidualFunction {
+            name: name.to_string(),
+            variables: var_names,
+            eval_fn: std::sync::Arc::new(move |vars| f(vars, &prefix_owned)),
+            dual_eval_fn: Some(std::sync::Arc::new(move |vars| f_dual(vars, &prefix_dual))),
+        }
+    }
+
+    /// Creates a residual function from a generic typed equation struct.
+    ///
+    /// This is the recommended approach for autodiff support. The equation struct
+    /// must be generic over the scalar type (implementing `EquationVarsGeneric<S>`),
+    /// and the closure must be generic over `S: Scalar`.
+    ///
+    /// This allows a single struct definition and closure to work with both
+    /// f64 (for evaluation) and Dual64 (for automatic differentiation).
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Name for the residual (for debugging/display)
+    /// * `prefix` - Prefix to prepend to variable names (e.g., unit name)
+    /// * `f` - Generic function that computes the residual for any scalar type
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use nomata::{ResidualFunction, EquationVarsGeneric, Scalar};
+    /// use std::collections::HashMap;
+    ///
+    /// struct MassBalanceVars<S: Scalar> {
+    ///     f_in: S,
+    ///     f_out: S,
+    /// }
+    ///
+    /// impl<S: Scalar> EquationVarsGeneric<S> for MassBalanceVars<S> {
+    ///     fn base_names() -> &'static [&'static str] {
+    ///         &["F_in", "F_out"]
+    ///     }
+    ///
+    ///     fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
+    ///         Some(Self {
+    ///             f_in: *vars.get(&format!("{}_F_in", prefix))?,
+    ///             f_out: *vars.get(&format!("{}_F_out", prefix))?,
+    ///         })
+    ///     }
+    /// }
+    ///
+    /// // Single closure works for both f64 and Dual64
+    /// let mass_balance = ResidualFunction::from_typed_generic::<MassBalanceVars<f64>, _>(
+    ///     "mass_balance",
+    ///     "unit",
+    ///     |v| v.f_in - v.f_out,
+    /// );
+    /// ```
+    #[cfg(feature = "autodiff")]
+    pub fn from_typed_generic<V, F>(name: &str, prefix: &str, f: F) -> Self
+    where
+        V: EquationVarsGeneric<f64>,
+        F: Fn(V) -> f64 + Clone + Send + Sync + 'static,
+    {
+        let var_names: Vec<String> =
+            V::base_names().iter().map(|n| format!("{}_{}", prefix, n)).collect();
+
+        let prefix_f64 = prefix.to_string();
+        let f_clone = f.clone();
+
+        ResidualFunction {
+            name: name.to_string(),
+            variables: var_names,
+            eval_fn: std::sync::Arc::new(move |vars| {
+                V::from_map(vars, &prefix_f64).map(&f_clone).unwrap_or(0.0)
+            }),
+            dual_eval_fn: None, // See from_typed_generic_with_dual for full autodiff
+        }
+    }
+
+    /// Creates a residual function with full generic autodiff support.
+    ///
+    /// Takes a generic closure and separate struct types for f64 and Dual64.
+    /// The Dual64 struct must implement `EquationVarsGeneric<Dual64>`.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Name for the residual
+    /// * `prefix` - Prefix for variable names
+    /// * `f` - Closure for f64 evaluation
+    /// * `f_dual` - Closure for Dual64 evaluation
+    ///
+    /// # Type Parameters
+    ///
+    /// * `V` - The f64 variable struct type
+    /// * `VDual` - The Dual64 variable struct type
+    /// * `F` - The f64 closure type
+    /// * `FDual` - The Dual64 closure type
+    #[cfg(feature = "autodiff")]
+    pub fn from_typed_generic_with_dual<V, VDual, F, FDual>(
+        name: &str,
+        prefix: &str,
+        f: F,
+        f_dual: FDual,
+    ) -> Self
+    where
+        V: EquationVarsGeneric<f64>,
+        VDual: EquationVarsGeneric<num_dual::Dual64>,
+        F: Fn(V) -> f64 + Send + Sync + 'static,
+        FDual: Fn(VDual) -> num_dual::Dual64 + Send + Sync + 'static,
+    {
+        let var_names: Vec<String> =
+            V::base_names().iter().map(|n| format!("{}_{}", prefix, n)).collect();
+
+        let prefix_f64 = prefix.to_string();
+        let prefix_dual = prefix.to_string();
+
+        ResidualFunction {
+            name: name.to_string(),
+            variables: var_names,
+            eval_fn: std::sync::Arc::new(move |vars| {
+                V::from_map(vars, &prefix_f64).map(&f).unwrap_or(0.0)
+            }),
+            dual_eval_fn: Some(std::sync::Arc::new(move |vars| {
+                VDual::from_map(vars, &prefix_dual)
+                    .map(&f_dual)
+                    .unwrap_or_else(|| num_dual::Dual64::from(0.0))
+            })),
+        }
+    }
+
+    /// Evaluates the residual using dual numbers for automatic differentiation.
+    ///
+    /// Returns `None` if no dual evaluation function is available.
+    #[cfg(feature = "autodiff")]
+    pub fn evaluate_dual(
+        &self,
+        var_values: &std::collections::HashMap<String, num_dual::Dual64>,
+    ) -> Option<num_dual::Dual64> {
+        self.dual_eval_fn.as_ref().map(|f| f(var_values))
+    }
+
+    /// Checks if this residual function supports automatic differentiation.
+    #[cfg(feature = "autodiff")]
+    pub fn supports_autodiff(&self) -> bool {
+        self.dual_eval_fn.is_some()
+    }
+
+    /// Creates a residual function from a dynamic equation struct.
+    ///
+    /// Use this for equations with runtime-determined variable counts
+    /// (e.g., mixers with N inlets, reactors with N components).
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Name for the residual (for debugging/display)
+    /// * `var_names` - List of variable names this function depends on
+    /// * `f` - Function that computes the residual given the typed variables
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use nomata::ResidualFunction;
+    /// use std::collections::HashMap;
+    ///
+    /// struct SumVars {
+    ///     inputs: Vec<f64>,
+    ///     output: f64,
+    /// }
+    ///
+    /// impl SumVars {
+    ///     fn from_map(vars: &HashMap<String, f64>, var_names: &[String]) -> Option<Self> {
+    ///         let n = var_names.len() - 1;
+    ///         let inputs: Option<Vec<f64>> = var_names[..n]
+    ///             .iter()
+    ///             .map(|name| vars.get(name).copied())
+    ///             .collect();
+    ///         Some(Self {
+    ///             inputs: inputs?,
+    ///             output: *vars.get(&var_names[n])?,
+    ///         })
+    ///     }
+    /// }
+    ///
+    /// let var_names = vec!["in_0".to_string(), "in_1".to_string(), "out".to_string()];
+    /// let sum_eq = ResidualFunction::from_dynamic(
+    ///     "sum",
+    ///     var_names.clone(),
+    ///     move |vars, names| {
+    ///         SumVars::from_map(vars, names)
+    ///             .map(|v| v.inputs.iter().sum::<f64>() - v.output)
+    ///             .unwrap_or(0.0)
+    ///     },
+    /// );
+    /// ```
+    #[cfg(not(feature = "autodiff"))]
+    pub fn from_dynamic<F>(name: &str, var_names: Vec<String>, f: F) -> Self
+    where
+        F: Fn(&std::collections::HashMap<String, f64>, &[String]) -> f64 + Send + Sync + 'static,
+    {
+        let var_names_clone = var_names.clone();
+        ResidualFunction {
+            name: name.to_string(),
+            variables: var_names,
+            eval_fn: std::sync::Arc::new(move |vars| f(vars, &var_names_clone)),
+        }
+    }
+
+    /// Creates a residual function from a dynamic equation struct (with autodiff support).
+    #[cfg(feature = "autodiff")]
+    pub fn from_dynamic<F>(name: &str, var_names: Vec<String>, f: F) -> Self
+    where
+        F: Fn(&std::collections::HashMap<String, f64>, &[String]) -> f64 + Send + Sync + 'static,
+    {
+        let var_names_clone = var_names.clone();
+        ResidualFunction {
+            name: name.to_string(),
+            variables: var_names,
+            eval_fn: std::sync::Arc::new(move |vars| f(vars, &var_names_clone)),
+            dual_eval_fn: None, // Dynamic equations don't support autodiff by default
+        }
+    }
+}
+
+/// Trait for typed equation variable sets.
+///
+/// Implement this trait for structs that represent the inputs to an equation.
+/// This provides compile-time type safety: forgetting a variable or using
+/// the wrong name causes a compile error.
+///
+/// # Example
+///
+/// ```
+/// use nomata::EquationVars;
+/// use std::collections::HashMap;
+///
+/// struct ArrheniusVars {
+///     k: f64,
+///     k0: f64,
+///     ea: f64,
+///     t: f64,
+/// }
+///
+/// impl EquationVars for ArrheniusVars {
+///     fn base_names() -> &'static [&'static str] {
+///         &["k", "k0", "Ea", "T"]
+///     }
+///
+///     fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
+///         Some(Self {
+///             k: *vars.get(&format!("{}_k", prefix))?,
+///             k0: *vars.get(&format!("{}_k0", prefix))?,
+///             ea: *vars.get(&format!("{}_Ea", prefix))?,
+///             t: *vars.get(&format!("{}_T", prefix))?,
+///         })
+///     }
+/// }
+/// ```
+pub trait EquationVars: Sized {
+    /// Returns the base variable names (without prefix).
+    ///
+    /// These are used to construct the full variable names by prepending
+    /// the unit/component prefix.
+    fn base_names() -> &'static [&'static str];
+
+    /// Constructs the variable set from a HashMap using prefixed names.
+    ///
+    /// Returns `None` if any required variable is missing.
+    fn from_map(vars: &std::collections::HashMap<String, f64>, prefix: &str) -> Option<Self>;
+}
+
+/// Trait for typed equation variable sets with dual number support.
+///
+/// Implement this trait alongside `EquationVars` to enable automatic
+/// differentiation for Jacobian computation.
+#[cfg(feature = "autodiff")]
+pub trait EquationVarsDual: Sized {
+    /// The corresponding f64 variable struct type.
+    type F64Vars: EquationVars;
+
+    /// Constructs the variable set from a HashMap of dual numbers.
+    ///
+    /// Returns `None` if any required variable is missing.
+    fn from_map_dual(
+        vars: &std::collections::HashMap<String, num_dual::Dual64>,
+        prefix: &str,
+    ) -> Option<Self>;
 }
 
 /// A system of equations (DAE system).
 ///
 /// Represents a complete differential-algebraic equation system for a
 /// process model, with both differential and algebraic equations.
+///
+/// # Variable Mapping
+///
+/// The equation system maintains a mapping from variable names (strings)
+/// to indices in the state/derivative vectors. This allows equations to
+/// reference variables by name (e.g., "F_in", "T_reactor") and have them
+/// correctly resolved during evaluation.
 #[derive(Debug)]
 pub struct EquationSystem<T: TimeDomain> {
     /// Differential equations (time derivatives)
     differential_equations: Vec<ResidualFunction>,
     /// Algebraic equations (constraints)
     algebraic_equations: Vec<ResidualFunction>,
+    /// Mapping from variable name to index in state vector
+    variable_indices: std::collections::HashMap<String, usize>,
+    /// Ordered list of variable names (index -> name)
+    variable_names: Vec<String>,
+    /// Which variables are differential (true) vs algebraic (false)
+    variable_is_differential: Vec<bool>,
     /// Phantom data for time domain
     _time_domain: PhantomData<T>,
 }
@@ -3132,21 +3694,113 @@ impl<T: TimeDomain> EquationSystem<T> {
         EquationSystem {
             differential_equations: Vec::new(),
             algebraic_equations: Vec::new(),
+            variable_indices: std::collections::HashMap::new(),
+            variable_names: Vec::new(),
+            variable_is_differential: Vec::new(),
             _time_domain: PhantomData,
         }
+    }
+
+    /// Registers a variable by name and returns its index.
+    ///
+    /// If the variable already exists, returns its existing index.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Unique variable name (e.g., "F_in", "T_reactor")
+    /// * `is_differential` - Whether this is a differential variable
+    ///
+    /// # Returns
+    ///
+    /// The index of the variable in the state vector.
+    pub fn register_variable(&mut self, name: &str, is_differential: bool) -> usize {
+        if let Some(&idx) = self.variable_indices.get(name) {
+            return idx;
+        }
+        let idx = self.variable_names.len();
+        self.variable_indices.insert(name.to_string(), idx);
+        self.variable_names.push(name.to_string());
+        self.variable_is_differential.push(is_differential);
+        idx
+    }
+
+    /// Registers multiple variables from an equation.
+    ///
+    /// Automatically extracts variable names from the equation and registers them.
+    /// Works with both expression-based and legacy term-based equations.
+    fn register_variables_from_equation(
+        &mut self,
+        equation: &ResidualFunction,
+        is_differential: bool,
+    ) {
+        // Use the unified variable_names() method which handles both Expr and legacy terms
+        for name in equation.variable_names() {
+            self.register_variable(&name, is_differential);
+        }
+    }
+
+    /// Gets the index of a variable by name.
+    pub fn variable_index(&self, name: &str) -> Option<usize> {
+        self.variable_indices.get(name).copied()
+    }
+
+    /// Gets the name of a variable by index.
+    pub fn variable_name(&self, index: usize) -> Option<&str> {
+        self.variable_names.get(index).map(|s| s.as_str())
+    }
+
+    /// Gets the total number of registered variables.
+    pub fn variable_count(&self) -> usize {
+        self.variable_names.len()
+    }
+
+    /// Gets all registered variable names in order.
+    pub fn all_variable_names(&self) -> &[String] {
+        &self.variable_names
+    }
+
+    /// Builds a variable name -> value mapping from state and derivative vectors.
+    ///
+    /// This is used by `evaluate_residuals_mapped` to look up values by name.
+    pub fn build_value_mapping(
+        &self,
+        state: &[f64],
+        derivatives: &[f64],
+    ) -> std::collections::HashMap<String, f64> {
+        let mut mapping = std::collections::HashMap::new();
+
+        for (idx, name) in self.variable_names.iter().enumerate() {
+            if self.variable_is_differential.get(idx).copied().unwrap_or(false) {
+                // Differential variable: value from derivatives vector
+                if idx < derivatives.len() {
+                    mapping.insert(name.clone(), derivatives[idx]);
+                }
+            } else {
+                // Algebraic variable: value from state vector
+                if idx < state.len() {
+                    mapping.insert(name.clone(), state[idx]);
+                }
+            }
+        }
+
+        mapping
     }
 
     /// Adds a differential equation to the system.
     ///
     /// Differential equations relate time derivatives to other variables.
+    /// Variables referenced in the equation are automatically registered.
     pub fn add_differential(&mut self, equation: ResidualFunction) {
+        self.register_variables_from_equation(&equation, true);
         self.differential_equations.push(equation);
     }
 
     /// Adds an algebraic equation to the system.
     ///
     /// Algebraic equations are constraints that must hold instantaneously.
+    /// Variables referenced in the equation are automatically registered.
     pub fn add_algebraic(&mut self, equation: ResidualFunction) {
+        self.register_variables_from_equation(&equation, false);
         self.algebraic_equations.push(equation);
     }
 
@@ -3186,36 +3840,109 @@ impl<T: TimeDomain> EquationSystem<T> {
     /// assert!(residuals.iter().all(|&r| r.abs() < 1e-6)); // Check convergence
     /// ```
     pub fn evaluate_residuals(&self, state: &[f64], derivatives: &[f64], _time: f64) -> Vec<f64> {
+        // Build value mapping from state and derivative vectors
+        // For proper evaluation, we need to map variable names to their values
+        let var_values = self.build_value_mapping_full(state, derivatives);
+
         let mut residuals = Vec::with_capacity(self.total_equations());
 
-        // Evaluate differential equations
+        // Evaluate differential equations using name-based lookup
         for eq in &self.differential_equations {
-            // For now, simple evaluation - in real implementation would map variables
-            let r = eq.evaluate(derivatives);
+            let r = eq.evaluate(&var_values);
             residuals.push(r);
         }
 
-        // Evaluate algebraic equations
+        // Evaluate algebraic equations using name-based lookup
         for eq in &self.algebraic_equations {
-            let r = eq.evaluate(state);
+            let r = eq.evaluate(&var_values);
             residuals.push(r);
         }
 
         residuals
     }
 
-    /// Computes the Jacobian matrix ∂F/∂x for the equation system.
+    /// Builds a complete value mapping where all variables can access both
+    /// state values and derivative values based on their context.
+    ///
+    /// This handles the complexity of equations that may reference both
+    /// differential variables (for their derivatives) and algebraic variables.
+    fn build_value_mapping_full(
+        &self,
+        state: &[f64],
+        derivatives: &[f64],
+    ) -> std::collections::HashMap<String, f64> {
+        let mut mapping = std::collections::HashMap::new();
+
+        // First pass: register state values for all variables
+        for (idx, name) in self.variable_names.iter().enumerate() {
+            if idx < state.len() {
+                mapping.insert(name.clone(), state[idx]);
+            }
+        }
+
+        // Second pass: for differential variables, also register derivative values
+        // using a naming convention (e.g., "dV_dt" for the derivative of "V")
+        for (idx, name) in self.variable_names.iter().enumerate() {
+            if self.variable_is_differential.get(idx).copied().unwrap_or(false)
+                && idx < derivatives.len()
+            {
+                // Register derivative with "d...dt" prefix
+                let deriv_name = format!("d{}_dt", name);
+                mapping.insert(deriv_name, derivatives[idx]);
+
+                // Also handle variants like "dV/dt" or "d(VC)/dt"
+                if name.starts_with("d") && (name.contains("_dt") || name.contains("/dt")) {
+                    mapping.insert(name.clone(), derivatives[idx]);
+                }
+            }
+        }
+
+        mapping
+    }
+
+    /// Computes the Jacobian matrix dF/dx for the equation system.
     ///
     /// This is required for implicit solvers (Newton-Raphson, BDF, etc.)
     ///
+    /// Uses finite difference approximation since `ResidualFunction` closures
+    /// operate on `HashMap<String, f64>` which cannot be directly differentiated.
+    ///
     /// # Returns
     ///
-    /// Dense Jacobian matrix as Vec<Vec<f64>>
-    ///
-    /// **Note**: Without `autodiff` feature, uses finite difference approximation.
+    /// Dense Jacobian matrix as `Vec<Vec<f64>>`
     #[cfg(not(feature = "autodiff"))]
     pub fn compute_jacobian(&self, state: &[f64]) -> Vec<Vec<f64>> {
-        // Use finite difference approximation: ∂f_i/∂x_j aprox (f_i(x+h*e_j) - f_i(x)) / h
+        self.compute_jacobian_numerical(state)
+    }
+
+    /// Computes the Jacobian matrix dF/dx for the equation system.
+    ///
+    /// When the `autodiff` feature is enabled and equations support it,
+    /// uses automatic differentiation with dual numbers for exact derivatives.
+    /// Falls back to finite differences for equations without dual support.
+    ///
+    /// # Returns
+    ///
+    /// Dense Jacobian matrix as `Vec<Vec<f64>>`
+    #[cfg(feature = "autodiff")]
+    pub fn compute_jacobian(&self, state: &[f64]) -> Vec<Vec<f64>> {
+        // Check if all equations support autodiff
+        let all_support_autodiff = self
+            .differential_equations
+            .iter()
+            .chain(self.algebraic_equations.iter())
+            .all(|eq| eq.supports_autodiff());
+
+        if all_support_autodiff {
+            self.compute_jacobian_autodiff(state)
+        } else {
+            self.compute_jacobian_numerical(state)
+        }
+    }
+
+    /// Computes Jacobian using finite difference approximation.
+    fn compute_jacobian_numerical(&self, state: &[f64]) -> Vec<Vec<f64>> {
+        // Use finite difference approximation: dF_i/dx_j = (F_i(x+h*e_j) - F_i(x)) / h
         let n = self.total_equations();
         let mut jacobian = vec![vec![0.0; n]; n];
         let h = 1e-8; // Step size for finite differences
@@ -3238,11 +3965,44 @@ impl<T: TimeDomain> EquationSystem<T> {
         jacobian
     }
 
-    /// Computes the Jacobian matrix using automatic differentiation.
+    /// Computes Jacobian using automatic differentiation with dual numbers.
     #[cfg(feature = "autodiff")]
-    pub fn compute_jacobian(&self, state: &[f64]) -> Vec<Vec<f64>> {
-        use crate::autodiff::compute_jacobian_autodiff;
-        compute_jacobian_autodiff(self, state)
+    fn compute_jacobian_autodiff(&self, state: &[f64]) -> Vec<Vec<f64>> {
+        use num_dual::Dual64;
+
+        let n_vars = state.len();
+        let n_eqs = self.total_equations();
+
+        // Compute columns of the Jacobian using forward-mode AD
+        let columns: Vec<Vec<f64>> = (0..n_vars)
+            .map(|j| {
+                // Build dual number mapping where variable j has derivative 1.0
+                let dual_vars: std::collections::HashMap<String, Dual64> = self
+                    .variable_names
+                    .iter()
+                    .enumerate()
+                    .filter(|(idx, _)| *idx < state.len())
+                    .map(|(idx, name)| {
+                        let dual = if idx == j {
+                            Dual64::new(state[idx], 1.0)
+                        } else {
+                            Dual64::from(state[idx])
+                        };
+                        (name.clone(), dual)
+                    })
+                    .collect();
+
+                // Evaluate all equations with dual numbers and extract derivatives
+                self.differential_equations
+                    .iter()
+                    .chain(self.algebraic_equations.iter())
+                    .map(|eq| eq.evaluate_dual(&dual_vars).map(|r| r.eps).unwrap_or(0.0))
+                    .collect()
+            })
+            .collect();
+
+        // Convert from column-major to row-major
+        (0..n_eqs).map(|i| columns.iter().map(|col| col[i]).collect()).collect()
     }
 
     /// Gets references to all differential equations.
@@ -3382,7 +4142,7 @@ mod tests {
         flowsheet.harvest_equations("MIX-301", &mixer);
 
         // In Dynamic mode:
-        // - 2 CSTRs: 2 × (3 differential + 2 algebraic) = 10 equations
+        // - 2 CSTRs: 2 * (3 differential + 2 algebraic) = 10 equations
         // - 1 Mixer<2> with 1 component: 3 differential (mass, energy, 1 component)
         // Total: 13 equations (9 differential + 4 algebraic)
         assert_eq!(flowsheet.equations().total_equations(), 13);
@@ -3595,23 +4355,43 @@ mod tests {
     }
 
     #[test]
-    fn test_equation_term() {
-        let term = EquationTerm::new(2.5, "flow_in");
-        assert_eq!(term.coefficient, 2.5);
-        assert_eq!(term.evaluate(10.0), 25.0);
+    fn test_equation_term_is_removed() {
+        // EquationTerm has been removed in favor of closure-based ResidualFunction
+        let residual = ResidualFunction::from_dynamic(
+            "mass_balance",
+            vec!["accumulation".to_string(), "flow_in".to_string(), "flow_out".to_string()],
+            |v, names| {
+                let accum = v.get(&names[0]).copied().unwrap_or(0.0);
+                let flow_in = v.get(&names[1]).copied().unwrap_or(0.0);
+                let flow_out = v.get(&names[2]).copied().unwrap_or(0.0);
+                accum - flow_in + flow_out
+            },
+        );
+
+        assert_eq!(residual.variable_names().len(), 3);
     }
 
     #[test]
     fn test_residual_function() {
-        let mut residual = ResidualFunction::new("mass_balance");
-        residual.add_term(EquationTerm::new(1.0, "accumulation"));
-        residual.add_term(EquationTerm::new(-1.0, "flow_in"));
-        residual.add_term(EquationTerm::new(1.0, "flow_out"));
+        let residual = ResidualFunction::from_dynamic(
+            "mass_balance",
+            vec!["accumulation".to_string(), "flow_in".to_string(), "flow_out".to_string()],
+            |v, names| {
+                let accum = v.get(&names[0]).copied().unwrap_or(0.0);
+                let flow_in = v.get(&names[1]).copied().unwrap_or(0.0);
+                let flow_out = v.get(&names[2]).copied().unwrap_or(0.0);
+                accum - flow_in + flow_out
+            },
+        );
 
-        assert_eq!(residual.term_count(), 3);
+        assert_eq!(residual.variable_names().len(), 3);
 
-        // Evaluate: 1.0*100 - 1.0*50 + 1.0*40 = 90
-        let result = residual.evaluate(&[100.0, 50.0, 40.0]);
+        // Evaluate: 100 - 50 + 40 = 90
+        let mut vars = std::collections::HashMap::new();
+        vars.insert("accumulation".to_string(), 100.0);
+        vars.insert("flow_in".to_string(), 50.0);
+        vars.insert("flow_out".to_string(), 40.0);
+        let result = residual.evaluate(&vars);
         assert_eq!(result, 90.0);
     }
 
@@ -3619,11 +4399,14 @@ mod tests {
     fn test_equation_system() {
         let mut system: EquationSystem<Dynamic> = EquationSystem::new();
 
-        let mut diff_eq = ResidualFunction::new("diff_1");
-        diff_eq.add_term(EquationTerm::new(1.0, "dhdt"));
-
-        let mut alg_eq = ResidualFunction::new("alg_1");
-        alg_eq.add_term(EquationTerm::new(1.0, "constraint"));
+        let diff_eq =
+            ResidualFunction::from_dynamic("diff_1", vec!["dhdt".to_string()], |v, names| {
+                v.get(&names[0]).copied().unwrap_or(0.0)
+            });
+        let alg_eq =
+            ResidualFunction::from_dynamic("alg_1", vec!["constraint".to_string()], |v, names| {
+                v.get(&names[0]).copied().unwrap_or(0.0)
+            });
 
         system.add_differential(diff_eq);
         system.add_algebraic(alg_eq);
@@ -3631,6 +4414,219 @@ mod tests {
         assert_eq!(system.differential_count(), 1);
         assert_eq!(system.algebraic_count(), 1);
         assert_eq!(system.total_equations(), 2);
+    }
+
+    #[test]
+    fn test_equation_system_variable_mapping() {
+        // Test that variable names are properly registered and mapped
+        let mut system: EquationSystem<Steady> = EquationSystem::new();
+
+        // Create a simple mass balance: 0 = F_in - F_out
+        let mass_balance = ResidualFunction::from_dynamic(
+            "mass_balance",
+            vec!["F_in".to_string(), "F_out".to_string()],
+            |v, names| {
+                let f_in = v.get(&names[0]).copied().unwrap_or(0.0);
+                let f_out = v.get(&names[1]).copied().unwrap_or(0.0);
+                -f_in + f_out
+            },
+        );
+
+        // Create a simple energy balance: 0 = Q - F*(T_out - T_in)
+        let energy_balance = ResidualFunction::from_dynamic(
+            "energy_balance",
+            vec!["Q".to_string(), "F_T_out".to_string(), "F_T_in".to_string()],
+            |v, names| {
+                let q = v.get(&names[0]).copied().unwrap_or(0.0);
+                let f_t_out = v.get(&names[1]).copied().unwrap_or(0.0);
+                let f_t_in = v.get(&names[2]).copied().unwrap_or(0.0);
+                q - f_t_out + f_t_in
+            },
+        );
+
+        system.add_algebraic(mass_balance);
+        system.add_algebraic(energy_balance);
+
+        // Check variable registration
+        assert_eq!(system.variable_count(), 5);
+        assert!(system.variable_index("F_in").is_some());
+        assert!(system.variable_index("F_out").is_some());
+        assert!(system.variable_index("Q").is_some());
+        assert!(system.variable_index("F_T_out").is_some());
+        assert!(system.variable_index("F_T_in").is_some());
+    }
+
+    #[test]
+    fn test_equation_system_evaluate_with_mapping() {
+        use std::collections::HashMap;
+
+        // Test the name-based evaluation
+        let mass_balance = ResidualFunction::from_dynamic(
+            "mass_balance",
+            vec!["F_in".to_string(), "F_out".to_string()],
+            |v, names| {
+                let f_in = v.get(&names[0]).copied().unwrap_or(0.0);
+                let f_out = v.get(&names[1]).copied().unwrap_or(0.0);
+                -f_in + f_out
+            },
+        );
+
+        // At steady state: F_in = F_out = 100
+        let mut var_values = HashMap::new();
+        var_values.insert("F_in".to_string(), 100.0);
+        var_values.insert("F_out".to_string(), 100.0);
+
+        let residual = mass_balance.evaluate(&var_values);
+        assert!((residual - 0.0).abs() < 1e-10, "Expected 0, got {}", residual);
+
+        // Non-steady state: F_in = 100, F_out = 80
+        var_values.insert("F_out".to_string(), 80.0);
+        let residual = mass_balance.evaluate(&var_values);
+        assert!((residual - (-20.0)).abs() < 1e-10, "Expected -20, got {}", residual);
+    }
+
+    #[test]
+    fn test_equation_system_evaluate_residuals() {
+        let mut system: EquationSystem<Steady> = EquationSystem::new();
+
+        // Create a simple equation: 0 = x - y (i.e., x = y)
+        let eq1 = ResidualFunction::from_dynamic(
+            "equality",
+            vec!["x".to_string(), "y".to_string()],
+            |v, names| {
+                let x = v.get(&names[0]).copied().unwrap_or(0.0);
+                let y = v.get(&names[1]).copied().unwrap_or(0.0);
+                x - y
+            },
+        );
+
+        system.add_algebraic(eq1);
+
+        // Register variables with known indices
+        let x_idx = system.variable_index("x").unwrap();
+        let y_idx = system.variable_index("y").unwrap();
+
+        // Create state vector
+        let mut state = vec![0.0; system.variable_count()];
+        state[x_idx] = 5.0;
+        state[y_idx] = 5.0;
+
+        let residuals = system.evaluate_residuals(&state, &[], 0.0);
+        assert_eq!(residuals.len(), 1);
+        assert!((residuals[0] - 0.0).abs() < 1e-10, "Expected 0, got {}", residuals[0]);
+
+        // Now make them unequal: x=5, y=3 => residual = 5 - 3 = 2
+        state[y_idx] = 3.0;
+        let residuals = system.evaluate_residuals(&state, &[], 0.0);
+        assert!((residuals[0] - 2.0).abs() < 1e-10, "Expected 2, got {}", residuals[0]);
+    }
+
+    #[test]
+    fn test_closure_arrhenius_evaluation() {
+        use std::collections::HashMap;
+
+        // Test Arrhenius equation: k - k0 * exp(-Ea / (R * T)) = 0
+        // Using R = 8.314 J/(mol·K)
+        let residual = ResidualFunction::from_dynamic(
+            "arrhenius",
+            vec!["k".to_string(), "k0".to_string(), "Ea".to_string(), "T".to_string()],
+            |vars, _names| {
+                let k = vars.get("k").copied().unwrap_or(0.0);
+                let k0 = vars.get("k0").copied().unwrap_or(0.0);
+                let ea = vars.get("Ea").copied().unwrap_or(0.0);
+                let t = vars.get("T").copied().unwrap_or(0.0);
+                k - k0 * (-ea / (8.314 * t)).exp()
+            },
+        );
+
+        // Test case: k0 = 1e8, Ea = 50000 J/mol, T = 350 K
+        // k_expected = 1e8 * exp(-50000 / (8.314 * 350)) = 1e8 * exp(-17.16)
+        //            ≈ 1e8 * 3.48e-8 ≈ 3.48
+        let k0: f64 = 1e8;
+        let ea: f64 = 50000.0;
+        let t: f64 = 350.0;
+        let r: f64 = 8.314;
+        let k_expected = k0 * (-ea / (r * t)).exp();
+
+        let mut values = HashMap::new();
+        values.insert("k0".to_string(), k0);
+        values.insert("Ea".to_string(), ea);
+        values.insert("T".to_string(), t);
+        values.insert("k".to_string(), k_expected);
+
+        // At the correct k, residual should be ~0
+        let res = residual.evaluate(&values);
+        assert!(res.abs() < 1e-6, "Expected ~0, got {}", res);
+
+        // With wrong k, residual should be non-zero
+        values.insert("k".to_string(), 1.0);
+        let res = residual.evaluate(&values);
+        assert!((res - (1.0 - k_expected)).abs() < 1e-6, "Wrong residual: {}", res);
+    }
+
+    #[test]
+    fn test_closure_reaction_rate() {
+        use std::collections::HashMap;
+
+        // First-order rate: r = k * C
+        // Residual: r - k * C = 0
+        let residual = ResidualFunction::from_dynamic(
+            "rate",
+            vec!["r".to_string(), "k".to_string(), "C".to_string()],
+            |vars, _names| {
+                let r = vars.get("r").copied().unwrap_or(0.0);
+                let k = vars.get("k").copied().unwrap_or(0.0);
+                let c = vars.get("C").copied().unwrap_or(0.0);
+                r - k * c
+            },
+        );
+
+        let mut values = HashMap::new();
+        values.insert("k".to_string(), 0.1); // rate constant
+        values.insert("C".to_string(), 2.0); // concentration
+        values.insert("r".to_string(), 0.2); // correct rate = 0.1 * 2.0
+
+        // At solution: residual = 0
+        let res = residual.evaluate(&values);
+        assert!(res.abs() < 1e-10, "Expected 0, got {}", res);
+
+        // With wrong rate
+        values.insert("r".to_string(), 0.5);
+        let res = residual.evaluate(&values);
+        assert!((res - 0.3).abs() < 1e-10, "Expected 0.3, got {}", res);
+    }
+
+    #[test]
+    fn test_closure_mass_balance() {
+        use std::collections::HashMap;
+
+        // Dynamic mass balance: dV/dt - (F_in - F_out) = 0
+        let residual = ResidualFunction::from_dynamic(
+            "mass_balance",
+            vec!["dV_dt".to_string(), "F_in".to_string(), "F_out".to_string()],
+            |vars, _names| {
+                let dv_dt = vars.get("dV_dt").copied().unwrap_or(0.0);
+                let f_in = vars.get("F_in").copied().unwrap_or(0.0);
+                let f_out = vars.get("F_out").copied().unwrap_or(0.0);
+                dv_dt - (f_in - f_out)
+            },
+        );
+
+        // At steady state: F_in = F_out = 100, dV/dt = 0
+        let mut values = HashMap::new();
+        values.insert("F_in".to_string(), 100.0);
+        values.insert("F_out".to_string(), 100.0);
+        values.insert("dV_dt".to_string(), 0.0);
+
+        let res = residual.evaluate(&values);
+        assert!(res.abs() < 1e-10, "Expected 0, got {}", res);
+
+        // Filling: F_in > F_out, dV/dt > 0
+        values.insert("F_in".to_string(), 120.0);
+        values.insert("F_out".to_string(), 100.0);
+        values.insert("dV_dt".to_string(), 20.0); // correct: 120 - 100 = 20
+        let res = residual.evaluate(&values);
+        assert!(res.abs() < 1e-10, "Expected 0, got {}", res);
     }
 
     #[test]
@@ -3924,8 +4920,11 @@ mod tests {
         let _u1 = flowsheet.add_unit("reactor");
 
         // Add equations to the system
-        let mut residual = ResidualFunction::new("mass_balance");
-        residual.add_term(EquationTerm::new(1.0, "accumulation"));
+        let residual = ResidualFunction::from_dynamic(
+            "mass_balance",
+            vec!["accumulation".to_string()],
+            |v, names| v.get(&names[0]).copied().unwrap_or(0.0),
+        );
 
         flowsheet.equation_system.add_differential(residual);
 

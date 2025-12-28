@@ -5,7 +5,112 @@ use crate::*;
 #[cfg(feature = "thermodynamics")]
 use crate::thermodynamics::{Fluid, fluids::Pure};
 
+use std::collections::HashMap;
 use std::marker::PhantomData;
+
+// Typed Equation Variable Structs (Generic for autodiff support)
+
+/// Variables for isentropic temperature equation: T2s - T1 * (P2/P1)^((gamma-1)/gamma) = 0
+///
+/// Generic over scalar type `S` to support both f64 and Dual64 for autodiff.
+pub struct IsentropicTempVars<S: Scalar> {
+    /// Isentropic outlet temperature
+    pub t2s: S,
+    /// T1 * (P2/P1)^((gamma-1)/gamma) computed externally
+    pub t1_pr_gamma: S,
+}
+
+impl<S: Scalar> EquationVarsGeneric<S> for IsentropicTempVars<S> {
+    fn base_names() -> &'static [&'static str] {
+        &["t2s", "t1_pr_gamma"]
+    }
+
+    fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
+        Some(Self {
+            t2s: *vars.get(&format!("{}_t2s", prefix))?,
+            t1_pr_gamma: *vars.get(&format!("{}_t1_pr_gamma", prefix))?,
+        })
+    }
+}
+
+impl EquationVars for IsentropicTempVars<f64> {
+    fn base_names() -> &'static [&'static str] {
+        &["t2s", "t1_pr_gamma"]
+    }
+
+    fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
+        <Self as EquationVarsGeneric<f64>>::from_map(vars, prefix)
+    }
+}
+
+/// Variables for actual outlet temperature: T2 - T1 - (T2s - T1)/eta = 0
+///
+/// Generic over scalar type `S` to support both f64 and Dual64 for autodiff.
+pub struct OutletTempVars<S: Scalar> {
+    /// Actual outlet temperature
+    pub t2: S,
+    /// Inlet temperature
+    pub t1: S,
+    /// (T2s - T1) / eta computed externally
+    pub dt_isen_eta: S,
+}
+
+impl<S: Scalar> EquationVarsGeneric<S> for OutletTempVars<S> {
+    fn base_names() -> &'static [&'static str] {
+        &["t2", "t1", "dt_isen_eta"]
+    }
+
+    fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
+        Some(Self {
+            t2: *vars.get(&format!("{}_t2", prefix))?,
+            t1: *vars.get(&format!("{}_t1", prefix))?,
+            dt_isen_eta: *vars.get(&format!("{}_dt_isen_eta", prefix))?,
+        })
+    }
+}
+
+impl EquationVars for OutletTempVars<f64> {
+    fn base_names() -> &'static [&'static str] {
+        &["t2", "t1", "dt_isen_eta"]
+    }
+
+    fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
+        <Self as EquationVarsGeneric<f64>>::from_map(vars, prefix)
+    }
+}
+
+/// Variables for compressor power: W - m * Cp * (T2 - T1) = 0
+///
+/// Generic over scalar type `S` to support both f64 and Dual64 for autodiff.
+pub struct CompressorPowerVars<S: Scalar> {
+    /// Compressor power
+    pub w: S,
+    /// m * Cp * (T2 - T1) computed externally
+    pub m_cp_dt: S,
+}
+
+impl<S: Scalar> EquationVarsGeneric<S> for CompressorPowerVars<S> {
+    fn base_names() -> &'static [&'static str] {
+        &["w", "m_cp_dt"]
+    }
+
+    fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
+        Some(Self {
+            w: *vars.get(&format!("{}_w", prefix))?,
+            m_cp_dt: *vars.get(&format!("{}_m_cp_dt", prefix))?,
+        })
+    }
+}
+
+impl EquationVars for CompressorPowerVars<f64> {
+    fn base_names() -> &'static [&'static str] {
+        &["w", "m_cp_dt"]
+    }
+
+    fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
+        <Self as EquationVarsGeneric<f64>>::from_map(vars, prefix)
+    }
+}
 
 /// Marker types for Compressor initialization states.
 pub struct Uninitialized;
@@ -186,24 +291,62 @@ impl<C, P: PortState> UnitOp for Compressor<C, P> {
     type In = Stream<MolarFlow>;
     type Out = Stream<MolarFlow>;
 
+    #[cfg(not(feature = "autodiff"))]
     fn build_equations<T: TimeDomain>(&self, system: &mut EquationSystem<T>, unit_name: &str) {
         // Isentropic outlet temperature: T2s = T1 * (P2/P1)^((gamma-1)/gamma)
-        let mut isentropic_eq = ResidualFunction::new(&format!("{}_isentropic_temp", unit_name));
-        isentropic_eq.add_term(EquationTerm::new(1.0, "T2s"));
-        isentropic_eq.add_term(EquationTerm::new(-1.0, "T1_PR_gamma"));
+        let isentropic_eq = ResidualFunction::from_typed(
+            &format!("{}_isentropic_temp", unit_name),
+            unit_name,
+            |v: IsentropicTempVars<f64>| v.t2s - v.t1_pr_gamma,
+        );
         system.add_algebraic(isentropic_eq);
 
         // Actual outlet temperature: T2 = T1 + (T2s - T1) / eta
-        let mut actual_temp_eq = ResidualFunction::new(&format!("{}_outlet_temp", unit_name));
-        actual_temp_eq.add_term(EquationTerm::new(1.0, "T2"));
-        actual_temp_eq.add_term(EquationTerm::new(-1.0, "T1"));
-        actual_temp_eq.add_term(EquationTerm::new(-1.0, "dT_isen_eta"));
+        let actual_temp_eq = ResidualFunction::from_typed(
+            &format!("{}_outlet_temp", unit_name),
+            unit_name,
+            |v: OutletTempVars<f64>| v.t2 - v.t1 - v.dt_isen_eta,
+        );
         system.add_algebraic(actual_temp_eq);
 
         // Power: W = m * Cp * (T2 - T1)
-        let mut power_eq = ResidualFunction::new(&format!("{}_power", unit_name));
-        power_eq.add_term(EquationTerm::new(1.0, "W"));
-        power_eq.add_term(EquationTerm::new(-1.0, "m_Cp_dT"));
+        let power_eq = ResidualFunction::from_typed(
+            &format!("{}_power", unit_name),
+            unit_name,
+            |v: CompressorPowerVars<f64>| v.w - v.m_cp_dt,
+        );
+        system.add_algebraic(power_eq);
+    }
+
+    #[cfg(feature = "autodiff")]
+    fn build_equations<T: TimeDomain>(&self, system: &mut EquationSystem<T>, unit_name: &str) {
+        use num_dual::Dual64;
+
+        // Isentropic outlet temperature: T2s = T1 * (P2/P1)^((gamma-1)/gamma)
+        let isentropic_eq = ResidualFunction::from_typed_generic_with_dual(
+            &format!("{}_isentropic_temp", unit_name),
+            unit_name,
+            |v: IsentropicTempVars<f64>| v.t2s - v.t1_pr_gamma,
+            |v: IsentropicTempVars<Dual64>| v.t2s - v.t1_pr_gamma,
+        );
+        system.add_algebraic(isentropic_eq);
+
+        // Actual outlet temperature: T2 = T1 + (T2s - T1) / eta
+        let actual_temp_eq = ResidualFunction::from_typed_generic_with_dual(
+            &format!("{}_outlet_temp", unit_name),
+            unit_name,
+            |v: OutletTempVars<f64>| v.t2 - v.t1 - v.dt_isen_eta,
+            |v: OutletTempVars<Dual64>| v.t2 - v.t1 - v.dt_isen_eta,
+        );
+        system.add_algebraic(actual_temp_eq);
+
+        // Power: W = m * Cp * (T2 - T1)
+        let power_eq = ResidualFunction::from_typed_generic_with_dual(
+            &format!("{}_power", unit_name),
+            unit_name,
+            |v: CompressorPowerVars<f64>| v.w - v.m_cp_dt,
+            |v: CompressorPowerVars<Dual64>| v.w - v.m_cp_dt,
+        );
         system.add_algebraic(power_eq);
     }
 }

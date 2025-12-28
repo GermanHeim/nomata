@@ -226,64 +226,105 @@ impl<const N: usize, I> UnitOp for Mixer<N, I> {
         if T::IS_STEADY {
             // Steady-state: no accumulation (typical for mixers)
             // Mass balance: 0 = sum(F_in_i) - F_out
-            let mut mass_balance = ResidualFunction::new(&format!("{}_mass_balance", unit_name));
-            for i in 0..N {
-                mass_balance.add_term(EquationTerm::new(1.0, &format!("F_in_{}", i)));
-            }
-            mass_balance.add_term(EquationTerm::new(-1.0, "F_out"));
+            let n = N;
+            let mut vars: Vec<String> = (0..n).map(|i| format!("F_in_{}", i)).collect();
+            vars.push("F_out".to_string());
+            let mass_balance = ResidualFunction::from_dynamic(
+                &format!("{}_mass_balance", unit_name),
+                vars,
+                move |v, names| {
+                    let sum_in: f64 =
+                        (0..n).map(|i| v.get(&names[i]).copied().unwrap_or(0.0)).sum();
+                    sum_in - v.get(&names[n]).copied().unwrap_or(0.0)
+                },
+            );
             system.add_algebraic(mass_balance);
 
             // Energy balance: 0 = sum(F_in_i*T_in_i) - F_out*T_out
-            let mut energy_balance =
-                ResidualFunction::new(&format!("{}_energy_balance", unit_name));
-            for i in 0..N {
-                energy_balance.add_term(EquationTerm::new(1.0, &format!("F_in_{}_T_in_{}", i, i)));
-            }
-            energy_balance.add_term(EquationTerm::new(-1.0, "F_out_T_out"));
+            let mut vars: Vec<String> = (0..n).map(|i| format!("F_in_{}_T_in_{}", i, i)).collect();
+            vars.push("F_out_T_out".to_string());
+            let energy_balance = ResidualFunction::from_dynamic(
+                &format!("{}_energy_balance", unit_name),
+                vars,
+                move |v, names| {
+                    let sum_in: f64 =
+                        (0..n).map(|i| v.get(&names[i]).copied().unwrap_or(0.0)).sum();
+                    sum_in - v.get(&names[n]).copied().unwrap_or(0.0)
+                },
+            );
             system.add_algebraic(energy_balance);
 
             // Component balances: 0 = sum(F_in_i*x_in_i_j) - F_out*x_out_j
             for j in 0..self.outlet_composition.len() {
-                let mut comp_balance =
-                    ResidualFunction::new(&format!("{}_component_{}_balance", unit_name, j));
-                for i in 0..N {
-                    comp_balance
-                        .add_term(EquationTerm::new(1.0, &format!("F_in_{}_x_in_{}_{}", i, i, j)));
-                }
-                comp_balance.add_term(EquationTerm::new(-1.0, &format!("F_out_x_out_{}", j)));
+                let jj = j;
+                let mut vars: Vec<String> =
+                    (0..n).map(|i| format!("F_in_{}_x_in_{}_{}", i, i, jj)).collect();
+                vars.push(format!("F_out_x_out_{}", jj));
+                let comp_balance = ResidualFunction::from_dynamic(
+                    &format!("{}_component_{}_balance", unit_name, j),
+                    vars,
+                    move |v, names| {
+                        let sum_in: f64 =
+                            (0..n).map(|i| v.get(&names[i]).copied().unwrap_or(0.0)).sum();
+                        sum_in - v.get(&names[n]).copied().unwrap_or(0.0)
+                    },
+                );
                 system.add_algebraic(comp_balance);
             }
         } else {
             // Dynamic: include accumulation terms
             // Mass balance: dM/dt = sum(F_in_i) - F_out
-            let mut mass_balance = ResidualFunction::new(&format!("{}_mass_balance", unit_name));
-            mass_balance.add_term(EquationTerm::new(1.0, "dM_dt"));
-            for i in 0..N {
-                mass_balance.add_term(EquationTerm::new(-1.0, &format!("F_in_{}", i)));
-            }
-            mass_balance.add_term(EquationTerm::new(1.0, "F_out"));
+            let n = N;
+            let mut vars: Vec<String> = vec!["dM_dt".to_string()];
+            vars.extend((0..n).map(|i| format!("F_in_{}", i)));
+            vars.push("F_out".to_string());
+            let mass_balance = ResidualFunction::from_dynamic(
+                &format!("{}_mass_balance", unit_name),
+                vars,
+                move |v, names| {
+                    let dm_dt = v.get(&names[0]).copied().unwrap_or(0.0);
+                    let sum_in: f64 =
+                        (1..=n).map(|i| v.get(&names[i]).copied().unwrap_or(0.0)).sum();
+                    let f_out = v.get(&names[n + 1]).copied().unwrap_or(0.0);
+                    dm_dt - sum_in + f_out
+                },
+            );
             system.add_differential(mass_balance);
 
             // Energy balance: d(M*T)/dt = sum(F_in_i*T_in_i) - F_out*T_out
-            let mut energy_balance =
-                ResidualFunction::new(&format!("{}_energy_balance", unit_name));
-            energy_balance.add_term(EquationTerm::new(1.0, "d_MT_dt"));
-            for i in 0..N {
-                energy_balance.add_term(EquationTerm::new(-1.0, &format!("F_in_{}_T_in_{}", i, i)));
-            }
-            energy_balance.add_term(EquationTerm::new(1.0, "F_out_T_out"));
+            let mut vars: Vec<String> = vec!["d_MT_dt".to_string()];
+            vars.extend((0..n).map(|i| format!("F_in_{}_T_in_{}", i, i)));
+            vars.push("F_out_T_out".to_string());
+            let energy_balance = ResidualFunction::from_dynamic(
+                &format!("{}_energy_balance", unit_name),
+                vars,
+                move |v, names| {
+                    let d_mt_dt = v.get(&names[0]).copied().unwrap_or(0.0);
+                    let sum_in: f64 =
+                        (1..=n).map(|i| v.get(&names[i]).copied().unwrap_or(0.0)).sum();
+                    let f_out_t_out = v.get(&names[n + 1]).copied().unwrap_or(0.0);
+                    d_mt_dt - sum_in + f_out_t_out
+                },
+            );
             system.add_differential(energy_balance);
 
             // Component balances: d(M*x_j)/dt = sum(F_in_i*x_in_i_j) - F_out*x_out_j
             for j in 0..self.outlet_composition.len() {
-                let mut comp_balance =
-                    ResidualFunction::new(&format!("{}_component_{}_balance", unit_name, j));
-                comp_balance.add_term(EquationTerm::new(1.0, &format!("d_Mx_{}_dt", j)));
-                for i in 0..N {
-                    comp_balance
-                        .add_term(EquationTerm::new(-1.0, &format!("F_in_{}_x_in_{}_{}", i, i, j)));
-                }
-                comp_balance.add_term(EquationTerm::new(1.0, &format!("F_out_x_out_{}", j)));
+                let jj = j;
+                let mut vars: Vec<String> = vec![format!("d_Mx_{}_dt", jj)];
+                vars.extend((0..n).map(|i| format!("F_in_{}_x_in_{}_{}", i, i, jj)));
+                vars.push(format!("F_out_x_out_{}", jj));
+                let comp_balance = ResidualFunction::from_dynamic(
+                    &format!("{}_component_{}_balance", unit_name, j),
+                    vars,
+                    move |v, names| {
+                        let d_mx_dt = v.get(&names[0]).copied().unwrap_or(0.0);
+                        let sum_in: f64 =
+                            (1..=n).map(|i| v.get(&names[i]).copied().unwrap_or(0.0)).sum();
+                        let f_out_x_out = v.get(&names[n + 1]).copied().unwrap_or(0.0);
+                        d_mx_dt - sum_in + f_out_x_out
+                    },
+                );
                 system.add_differential(comp_balance);
             }
         }

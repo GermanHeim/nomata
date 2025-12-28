@@ -5,7 +5,74 @@ use crate::*;
 #[cfg(feature = "thermodynamics")]
 use crate::thermodynamics::{Fluid, fluids::Pure};
 
+use std::collections::HashMap;
 use std::marker::PhantomData;
+
+// Typed Equation Variable Structs (Generic for autodiff support)
+
+/// Variables for head calculation: H - dP/(rho*g) = 0
+///
+/// Generic over scalar type `S` to support both f64 and Dual64 for autodiff.
+pub struct PumpHeadVars<S: Scalar> {
+    pub h: S,
+    pub dp_rho_g: S,
+}
+
+impl<S: Scalar> EquationVarsGeneric<S> for PumpHeadVars<S> {
+    fn base_names() -> &'static [&'static str] {
+        &["H", "dP_rho_g"]
+    }
+
+    fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
+        Some(Self {
+            h: *vars.get(&format!("{}_H", prefix))?,
+            dp_rho_g: *vars.get(&format!("{}_dP_rho_g", prefix))?,
+        })
+    }
+}
+
+// Backwards compatibility: EquationVars for f64
+impl EquationVars for PumpHeadVars<f64> {
+    fn base_names() -> &'static [&'static str] {
+        &["H", "dP_rho_g"]
+    }
+
+    fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
+        <Self as EquationVarsGeneric<f64>>::from_map(vars, prefix)
+    }
+}
+
+/// Variables for power calculation: W - rho*g*H*Q/eta = 0
+///
+/// Generic over scalar type `S` to support both f64 and Dual64 for autodiff.
+pub struct PumpPowerVars<S: Scalar> {
+    pub w: S,
+    pub rho_g_h_q_eta: S,
+}
+
+impl<S: Scalar> EquationVarsGeneric<S> for PumpPowerVars<S> {
+    fn base_names() -> &'static [&'static str] {
+        &["W", "rho_g_H_Q_eta"]
+    }
+
+    fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
+        Some(Self {
+            w: *vars.get(&format!("{}_W", prefix))?,
+            rho_g_h_q_eta: *vars.get(&format!("{}_rho_g_H_Q_eta", prefix))?,
+        })
+    }
+}
+
+// Backwards compatibility: EquationVars for f64
+impl EquationVars for PumpPowerVars<f64> {
+    fn base_names() -> &'static [&'static str] {
+        &["W", "rho_g_H_Q_eta"]
+    }
+
+    fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
+        <Self as EquationVarsGeneric<f64>>::from_map(vars, prefix)
+    }
+}
 
 /// Marker types for Pump initialization states.
 pub struct Uninitialized;
@@ -182,17 +249,45 @@ impl<C, P: PortState> UnitOp for Pump<C, P> {
     type In = Stream<MassFlow>;
     type Out = Stream<MassFlow>;
 
+    #[cfg(not(feature = "autodiff"))]
     fn build_equations<T: TimeDomain>(&self, system: &mut EquationSystem<T>, unit_name: &str) {
-        // Head calculation: H = (P2 - P1) / (rho * g)
-        let mut head_eq = ResidualFunction::new(&format!("{}_head", unit_name));
-        head_eq.add_term(EquationTerm::new(1.0, "H"));
-        head_eq.add_term(EquationTerm::new(-1.0, "dP_rho_g"));
+        // Head calculation: H - dP/(rho*g) = 0
+        let head_eq = ResidualFunction::from_typed(
+            &format!("{}_head", unit_name),
+            unit_name,
+            |v: PumpHeadVars<f64>| v.h - v.dp_rho_g,
+        );
         system.add_algebraic(head_eq);
 
-        // Power calculation: W = rho * g * H * Q / eta
-        let mut power_eq = ResidualFunction::new(&format!("{}_power", unit_name));
-        power_eq.add_term(EquationTerm::new(1.0, "W"));
-        power_eq.add_term(EquationTerm::new(-1.0, "rho_g_H_Q_eta"));
+        // Power calculation: W - rho*g*H*Q/eta = 0
+        let power_eq = ResidualFunction::from_typed(
+            &format!("{}_power", unit_name),
+            unit_name,
+            |v: PumpPowerVars<f64>| v.w - v.rho_g_h_q_eta,
+        );
+        system.add_algebraic(power_eq);
+    }
+
+    #[cfg(feature = "autodiff")]
+    fn build_equations<T: TimeDomain>(&self, system: &mut EquationSystem<T>, unit_name: &str) {
+        use num_dual::Dual64;
+
+        // Head calculation: H - dP/(rho*g) = 0
+        let head_eq = ResidualFunction::from_typed_generic_with_dual(
+            &format!("{}_head", unit_name),
+            unit_name,
+            |v: PumpHeadVars<f64>| v.h - v.dp_rho_g,
+            |v: PumpHeadVars<Dual64>| v.h - v.dp_rho_g,
+        );
+        system.add_algebraic(head_eq);
+
+        // Power calculation: W - rho*g*H*Q/eta = 0
+        let power_eq = ResidualFunction::from_typed_generic_with_dual(
+            &format!("{}_power", unit_name),
+            unit_name,
+            |v: PumpPowerVars<f64>| v.w - v.rho_g_h_q_eta,
+            |v: PumpPowerVars<Dual64>| v.w - v.rho_g_h_q_eta,
+        );
         system.add_algebraic(power_eq);
     }
 }

@@ -14,7 +14,76 @@
 //! ```
 
 use crate::*;
+use std::collections::HashMap;
 use std::marker::PhantomData;
+
+// Typed Equation Variable Structs (Generic for autodiff support)
+
+/// Variables for split fraction equation: F_out_i - frac_i * F_in = 0
+///
+/// Generic over scalar type `S` to support both f64 and Dual64 for autodiff.
+pub struct SplitFractionVars<S: Scalar> {
+    /// Outlet flow for this split
+    pub f_out: S,
+    /// frac_i * F_in computed externally
+    pub frac_f_in: S,
+}
+
+impl<S: Scalar> EquationVarsGeneric<S> for SplitFractionVars<S> {
+    fn base_names() -> &'static [&'static str] {
+        &["f_out", "frac_f_in"]
+    }
+
+    fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
+        Some(Self {
+            f_out: *vars.get(&format!("{}_f_out", prefix))?,
+            frac_f_in: *vars.get(&format!("{}_frac_f_in", prefix))?,
+        })
+    }
+}
+
+impl EquationVars for SplitFractionVars<f64> {
+    fn base_names() -> &'static [&'static str] {
+        &["f_out", "frac_f_in"]
+    }
+
+    fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
+        <Self as EquationVarsGeneric<f64>>::from_map(vars, prefix)
+    }
+}
+
+/// Variables for temperature continuity: T_out_i - T_in = 0
+///
+/// Generic over scalar type `S` to support both f64 and Dual64 for autodiff.
+pub struct TempContinuityVars<S: Scalar> {
+    /// Outlet temperature
+    pub t_out: S,
+    /// Inlet temperature
+    pub t_in: S,
+}
+
+impl<S: Scalar> EquationVarsGeneric<S> for TempContinuityVars<S> {
+    fn base_names() -> &'static [&'static str] {
+        &["t_out", "t_in"]
+    }
+
+    fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
+        Some(Self {
+            t_out: *vars.get(&format!("{}_t_out", prefix))?,
+            t_in: *vars.get(&format!("{}_t_in", prefix))?,
+        })
+    }
+}
+
+impl EquationVars for TempContinuityVars<f64> {
+    fn base_names() -> &'static [&'static str] {
+        &["t_out", "t_in"]
+    }
+
+    fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
+        <Self as EquationVarsGeneric<f64>>::from_map(vars, prefix)
+    }
+}
 
 /// Phantom type marker for uninitialized state.
 pub struct Uninitialized;
@@ -139,28 +208,88 @@ impl<const N: usize, S> UnitOp for Splitter<N, S> {
     type In = Stream<MolarFlow>;
     type Out = Stream<MolarFlow>;
 
+    #[cfg(not(feature = "autodiff"))]
     fn build_equations<T: TimeDomain>(&self, system: &mut EquationSystem<T>, unit_name: &str) {
-        // Mass balance: F_in = sum(F_out_i)
-        let mut mass_balance = ResidualFunction::new(&format!("{}_mass_balance", unit_name));
-        mass_balance.add_term(EquationTerm::new(1.0, "F_in"));
-        for i in 0..N {
-            mass_balance.add_term(EquationTerm::new(-1.0, &format!("F_out_{}", i)));
-        }
+        let n = N;
+
+        // Mass balance: F_in - sum(F_out_i) = 0
+        let mut vars: Vec<String> = vec!["F_in".to_string()];
+        vars.extend((0..n).map(|i| format!("F_out_{}", i)));
+        let mass_balance = ResidualFunction::from_dynamic(
+            &format!("{}_mass_balance", unit_name),
+            vars,
+            move |v, names| {
+                let f_in = v.get(&names[0]).copied().unwrap_or(0.0);
+                let sum_out: f64 = (1..=n).map(|i| v.get(&names[i]).copied().unwrap_or(0.0)).sum();
+                f_in - sum_out
+            },
+        );
         system.add_algebraic(mass_balance);
 
-        // Split fraction constraints: F_out_i = frac_i * F_in
+        // Split fraction constraints: F_out_i - frac_i * F_in = 0
         for i in 0..N {
-            let mut split_eq = ResidualFunction::new(&format!("{}_split_{}", unit_name, i));
-            split_eq.add_term(EquationTerm::new(1.0, &format!("F_out_{}", i)));
-            split_eq.add_term(EquationTerm::new(-1.0, &format!("frac_{}_F_in", i)));
+            let prefix = format!("{}_split_{}", unit_name, i);
+            let split_eq = ResidualFunction::from_typed(
+                &format!("{}_split_{}", unit_name, i),
+                &prefix,
+                |v: SplitFractionVars<f64>| v.f_out - v.frac_f_in,
+            );
             system.add_algebraic(split_eq);
         }
 
-        // Temperature continuity: T_out_i = T_in for all outlets
+        // Temperature continuity: T_out_i - T_in = 0 for all outlets
         for i in 0..N {
-            let mut temp_eq = ResidualFunction::new(&format!("{}_temp_{}", unit_name, i));
-            temp_eq.add_term(EquationTerm::new(1.0, &format!("T_out_{}", i)));
-            temp_eq.add_term(EquationTerm::new(-1.0, "T_in"));
+            let prefix = format!("{}_temp_{}", unit_name, i);
+            let temp_eq = ResidualFunction::from_typed(
+                &format!("{}_temp_{}", unit_name, i),
+                &prefix,
+                |v: TempContinuityVars<f64>| v.t_out - v.t_in,
+            );
+            system.add_algebraic(temp_eq);
+        }
+    }
+
+    #[cfg(feature = "autodiff")]
+    fn build_equations<T: TimeDomain>(&self, system: &mut EquationSystem<T>, unit_name: &str) {
+        use num_dual::Dual64;
+        let n = N;
+
+        // Mass balance: F_in - sum(F_out_i) = 0
+        // Note: from_dynamic doesn't have autodiff support, kept as-is
+        let mut vars: Vec<String> = vec!["F_in".to_string()];
+        vars.extend((0..n).map(|i| format!("F_out_{}", i)));
+        let mass_balance = ResidualFunction::from_dynamic(
+            &format!("{}_mass_balance", unit_name),
+            vars,
+            move |v, names| {
+                let f_in = v.get(&names[0]).copied().unwrap_or(0.0);
+                let sum_out: f64 = (1..=n).map(|i| v.get(&names[i]).copied().unwrap_or(0.0)).sum();
+                f_in - sum_out
+            },
+        );
+        system.add_algebraic(mass_balance);
+
+        // Split fraction constraints: F_out_i - frac_i * F_in = 0
+        for i in 0..N {
+            let prefix = format!("{}_split_{}", unit_name, i);
+            let split_eq = ResidualFunction::from_typed_generic_with_dual(
+                &format!("{}_split_{}", unit_name, i),
+                &prefix,
+                |v: SplitFractionVars<f64>| v.f_out - v.frac_f_in,
+                |v: SplitFractionVars<Dual64>| v.f_out - v.frac_f_in,
+            );
+            system.add_algebraic(split_eq);
+        }
+
+        // Temperature continuity: T_out_i - T_in = 0 for all outlets
+        for i in 0..N {
+            let prefix = format!("{}_temp_{}", unit_name, i);
+            let temp_eq = ResidualFunction::from_typed_generic_with_dual(
+                &format!("{}_temp_{}", unit_name, i),
+                &prefix,
+                |v: TempContinuityVars<f64>| v.t_out - v.t_in,
+                |v: TempContinuityVars<Dual64>| v.t_out - v.t_in,
+            );
             system.add_algebraic(temp_eq);
         }
     }

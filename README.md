@@ -181,22 +181,92 @@ if mass_balance.is_satisfied(1e-6) {
 
 ### Residual Functions
 
-Build complete residual functions for DAE systems:
+Build type-safe residual functions for DAE systems using `EquationVars`:
 
 ```rust
-use nomata::{ResidualFunction, EquationTerm};
+use nomata::{ResidualFunction, EquationVars};
+use std::collections::HashMap;
 
-let mut residual = ResidualFunction::new("mass_balance");
+// Define typed variables for a mass balance equation
+struct MassBalanceVars {
+    accumulation: f64,
+    flow_in: f64,
+    flow_out: f64,
+}
 
-// Add terms: dN/dt = F_in - F_out + generation
-residual.add_term(EquationTerm::new(1.0, "accumulation"));
-residual.add_term(EquationTerm::new(-1.0, "flow_in"));
-residual.add_term(EquationTerm::new(1.0, "flow_out"));
-residual.add_term(EquationTerm::new(-1.0, "generation"));
+impl EquationVars for MassBalanceVars {
+    fn base_names() -> &'static [&'static str] {
+        &["accumulation", "flow_in", "flow_out"]
+    }
 
-// Evaluate residual
-let result = residual.evaluate(&[dhdt, flow_in, flow_out, generation]);
+    fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
+        Some(Self {
+            accumulation: *vars.get(&format!("{}_accumulation", prefix))?,
+            flow_in: *vars.get(&format!("{}_flow_in", prefix))?,
+            flow_out: *vars.get(&format!("{}_flow_out", prefix))?,
+        })
+    }
+}
+
+// Create type-safe residual: dN/dt = F_in - F_out
+let residual = ResidualFunction::from_typed(
+    "mass_balance",
+    "reactor",
+    |v: MassBalanceVars| v.accumulation - v.flow_in + v.flow_out,
+);
+
+// For dynamic variable counts (e.g., N-inlet mixers), use from_dynamic:
+let var_names = vec!["inlet_0_F".into(), "inlet_1_F".into(), "outlet_F".into()];
+let mixer_balance = ResidualFunction::from_dynamic(
+    "mixer_mass_balance",
+    var_names,
+    |vars, names| {
+        let outlet = vars.get(&names[names.len()-1]).copied().unwrap_or(0.0);
+        let inlet_sum: f64 = names[..names.len()-1]
+            .iter()
+            .filter_map(|n| vars.get(n))
+            .sum();
+        outlet - inlet_sum
+    },
+);
 ```
+
+### Automatic Differentiation
+
+With the `autodiff` feature enabled, all unit operation models support automatic differentiation for efficient Jacobian computation:
+
+```rust
+use nomata::{Scalar, EquationVarsGeneric};
+use std::collections::HashMap;
+
+// Define equation variables generic over scalar type
+pub struct ArrheniusVars<S: Scalar> {
+    pub k: S,
+    pub k0: S,
+    pub ea: S,
+    pub t: S,
+}
+
+impl<S: Scalar> EquationVarsGeneric<S> for ArrheniusVars<S> {
+    fn base_names() -> &'static [&'static str] {
+        &["k", "k0", "Ea", "T"]
+    }
+
+    fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
+        Some(Self {
+            k: vars.get(&format!("{}_k", prefix))?.clone(),
+            k0: vars.get(&format!("{}_k0", prefix))?.clone(),
+            ea: vars.get(&format!("{}_Ea", prefix))?.clone(),
+            t: vars.get(&format!("{}_T", prefix))?.clone(),
+        })
+    }
+}
+
+// The Scalar trait provides exp, ln, sqrt, powf, abs, sin, cos
+// that work with both f64 and Dual64 for automatic differentiation
+```
+
+The `Scalar` trait enables equations like the Arrhenius equation (`k = k0 * exp(-Ea/RT)`) to be automatically differentiated, providing exact Jacobians for Newton-based solvers.
 
 ### Complete DAE Systems
 
@@ -220,23 +290,12 @@ println!("Differential: {}", system.differential_count());
 println!("Algebraic: {}", system.algebraic_count());
 ```
 
-### Unit Operations and Equation Harvesting
+### Equation Harvesting
 
 Unit operations know their own physics and can automatically generate equations:
 
 ```rust
 use nomata::{UnitOp, Flowsheet, Dynamic, models::CSTR, Stream, MolarFlow};
-
-// Define a unit operation trait
-trait UnitOp {
-    type In;
-    type Out;
-    
-    // Unit builds its own equations
-    fn build_equations<T: TimeDomain>(&self, system: &mut EquationSystem<T>, name: &str) {
-        // Add mass balance, energy balance, kinetics, etc.
-    }
-}
 
 // Generic simulation loop
 let mut flowsheet = Flowsheet::<Dynamic>::new();
@@ -251,12 +310,71 @@ assert_eq!(flowsheet.equations().total_equations(), 5);
 
 ### Connections Are Type-Checked
 
-```rust
-use nomata::{connect, Stream, MolarFlow, MassFlow};
+Nomata provides a unified, type-safe connection system that enforces stream compatibility at both compile time and runtime.
 
-// Connections are validated at compile time
-connect(&reactor, &separator); // Only compiles if types match
+#### Port Specification
+
+Unit operations declare their ports using the `PortSpec` trait, which specifies port counts and stream types at compile time:
+
+```rust
+use nomata::{PortSpec, Stream, MolarFlow, MassFlow};
+
+// Single-port units (1 input, 1 output)
+impl PortSpec for Reactor {
+    const INPUT_COUNT: usize = 1;
+    const OUTPUT_COUNT: usize = 1;
+    type STREAM_TYPE = MolarFlow;
+}
+
+// Multi-port units (N inputs, 1 output)
+impl PortSpec for Mixer {
+    const INPUT_COUNT: usize = 3;  // Can mix 3 inlet streams
+    const OUTPUT_COUNT: usize = 1;
+    type STREAM_TYPE = MassFlow;
+}
 ```
+
+#### Runtime Port Discovery
+
+The `HasPorts` trait provides runtime access to port information:
+
+```rust
+use nomata::HasPorts;
+
+let reactor = Reactor::new(/* ... */);
+println!("Reactor has {} inputs, {} outputs",
+    reactor.input_ports().len(),
+    reactor.output_ports().len()
+);
+```
+
+#### Type-Safe Connections
+
+The unified `connect()` function performs compile-time bounds checking and runtime stream type validation:
+
+```rust
+use nomata::connect;
+
+// Compile-time: Checks that reactor has exactly 1 output and separator has exactly 1 input
+// Runtime: Validates that both units use compatible stream types
+connect(&reactor, &separator)?; // Returns Result<(), ConnectionError>
+
+// Multi-port connections use port indices
+connect_at(&mixer, 0, &reactor, 0)?; // Connect mixer's output 0 to reactor's input 0
+connect_at(&splitter, 0, &separator, 1)?; // Connect splitter's output 0 to separator's input 1
+```
+
+Invalid connections are caught at compile time:
+
+```rust,compile_fail
+// ERROR: Reactor has only 1 output, cannot connect output index 2
+connect_at(&reactor, 2, &separator, 0);
+```
+
+The connection system ensures that:
+- **Port bounds are checked at compile time** - Invalid port indices won't compile
+- **Stream types are validated at runtime** - Incompatible streams return a `ConnectionError`
+- **Zero runtime overhead** - All validation logic is optimized away when successful
 
 ## Building from Source
 

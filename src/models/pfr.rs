@@ -566,8 +566,8 @@ mod tests {
             .with_geometry(10.0, 0.1, 20)
             .with_thermodynamics(-50000.0, 1000.0, 4184.0);
 
-        assert_eq!(pfr.length.as_ref().unwrap().get(), 10.0);
-        assert_eq!(pfr.area.as_ref().unwrap().get(), 0.1);
+        assert_eq!(pfr.length.as_ref().expect("length should be set after with_geometry").get(), 10.0);
+        assert_eq!(pfr.area.as_ref().expect("area should be set after with_geometry").get(), 0.1);
         assert_eq!(pfr.n_segments.unwrap(), 20);
         assert_eq!(pfr.concentration_profile.len(), 20);
         assert_eq!(pfr.temperature_profile.len(), 20);

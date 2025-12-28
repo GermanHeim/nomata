@@ -172,8 +172,8 @@ impl<P: PortState> Valve<Initialized, P> {
     pub fn compute_flow(&mut self, pressure_drop: f64) {
         self.pressure_drop = Var::new(pressure_drop);
 
-        let cv = self.cv.as_ref().unwrap().get();
-        let opening = self.opening.as_ref().unwrap().get();
+        let cv = self.cv.as_ref().expect("cv should be set for Initialized valve").get();
+        let opening = self.opening.as_ref().expect("opening should be set for Initialized valve").get();
 
         // F = Cv * opening * sqrt(dP)
         let flow = cv * opening * pressure_drop.abs().sqrt();

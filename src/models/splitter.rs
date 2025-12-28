@@ -171,7 +171,10 @@ impl<const N: usize> Splitter<N, Initialized> {
     ///
     /// Only available for configured splitters.
     pub fn compute_outlets(&mut self) {
-        let fractions = self.split_fractions.as_ref().expect("split_fractions should be set for Initialized splitter");
+        let fractions = self
+            .split_fractions
+            .as_ref()
+            .expect("split_fractions should be set for Initialized splitter");
         for (i, frac_var) in fractions.iter().enumerate().take(N) {
             let frac = frac_var.get();
             self.outlet_flows[i] = Var::new(self.inlet_flow * frac);
@@ -181,12 +184,20 @@ impl<const N: usize> Splitter<N, Initialized> {
 
     /// Gets split fraction for outlet i (guaranteed to exist).
     pub fn split_fraction(&self, i: usize) -> f64 {
-        self.split_fractions.as_ref().expect("split_fractions should be set for Initialized splitter")[i].get()
+        self.split_fractions
+            .as_ref()
+            .expect("split_fractions should be set for Initialized splitter")[i]
+            .get()
     }
 
     /// Gets all split fractions.
     pub fn split_fractions(&self) -> Vec<f64> {
-        self.split_fractions.as_ref().expect("split_fractions should be set for Initialized splitter").iter().map(|f| f.get()).collect()
+        self.split_fractions
+            .as_ref()
+            .expect("split_fractions should be set for Initialized splitter")
+            .iter()
+            .map(|f| f.get())
+            .collect()
     }
 }
 
@@ -201,6 +212,15 @@ impl<const N: usize, S> HasPorts for Splitter<N, S> {
     fn output_ports(&self) -> Vec<NamedPort> {
         (0..N).map(|i| NamedPort::output(&format!("outlet_{}", i), "MolarFlow")).collect()
     }
+}
+
+/// Compile-time port specification for Splitter.
+///
+/// Enables type-safe connections with const generic port indices.
+impl<const N: usize, S> PortSpec for Splitter<N, S> {
+    const INPUT_COUNT: usize = 1;
+    const OUTPUT_COUNT: usize = N;
+    const STREAM_TYPE: &'static str = "MolarFlow";
 }
 
 /// UnitOp implementation for Splitter.

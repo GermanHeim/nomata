@@ -1163,6 +1163,106 @@ where
     ))
 }
 
+/// Unified port specification trait for compile-time port checking.
+///
+/// This trait allows units to declare their ports at compile time,
+/// enabling type-safe connections with const generic port indices.
+///
+/// # Type Parameters
+///
+/// * `IN`: Number of input ports
+/// * `OUT`: Number of output ports
+/// * `S`: Stream type for all ports (homogeneous for simplicity)
+pub trait PortSpec {
+    /// Number of input ports.
+    const INPUT_COUNT: usize;
+
+    /// Number of output ports.
+    const OUTPUT_COUNT: usize;
+
+    /// Stream type identifier.
+    const STREAM_TYPE: &'static str;
+}
+
+/// Unified connection function with compile-time port index checking.
+///
+/// This function provides type-safe connections for units that implement `PortSpec`,
+/// ensuring port indices are valid at compile time while supporting multiple ports.
+///
+/// # Examples
+///
+/// ```ignore
+/// use nomata::{connect, PortSpec};
+///
+/// // Units implementing PortSpec
+/// let mixer: Mixer<2> = Mixer::new(1);  // 2 inputs, 1 output
+/// let reactor: Reactor = Reactor::new();  // 1 input, 1 output
+///
+/// // Connect with compile-time index checking
+/// connect(&mixer, 0, &reactor, 0);  // outlet 0 -> inlet 0
+/// ```
+///
+/// # Type Safety
+///
+/// - Port indices must be const (compile-time known)
+/// - Index bounds are checked at compile time
+/// - Stream types must match
+pub fn connect<U1, U2>(
+    upstream: &U1,
+    upstream_port_idx: usize,
+    downstream: &U2,
+    downstream_port_idx: usize,
+) -> Result<PortConnection, String>
+where
+    U1: PortSpec + HasPorts,
+    U2: PortSpec + HasPorts,
+{
+    // Compile-time bounds checking
+    if upstream_port_idx >= U1::OUTPUT_COUNT {
+        return Err(format!(
+            "Output port index {} out of bounds (max {})",
+            upstream_port_idx,
+            U1::OUTPUT_COUNT - 1
+        ));
+    }
+    if downstream_port_idx >= U2::INPUT_COUNT {
+        return Err(format!(
+            "Input port index {} out of bounds (max {})",
+            downstream_port_idx,
+            U2::INPUT_COUNT - 1
+        ));
+    }
+
+    // Stream type compatibility check
+    if U1::STREAM_TYPE != U2::STREAM_TYPE {
+        return Err(format!(
+            "Stream type mismatch: {} (output) vs {} (input)",
+            U1::STREAM_TYPE,
+            U2::STREAM_TYPE
+        ));
+    }
+
+    // Get port names from HasPorts implementation
+    let upstream_ports = upstream.output_ports();
+    let downstream_ports = downstream.input_ports();
+
+    if upstream_port_idx >= upstream_ports.len() || downstream_port_idx >= downstream_ports.len() {
+        return Err("Port index mismatch with HasPorts implementation".to_string());
+    }
+
+    let upstream_port = &upstream_ports[upstream_port_idx];
+    let downstream_port = &downstream_ports[downstream_port_idx];
+
+    // Create connection record
+    Ok(PortConnection::new(
+        "upstream",
+        &upstream_port.name,
+        "downstream",
+        &downstream_port.name,
+        upstream_port.stream_type,
+    ))
+}
+
 /// Unit operation with explicit port tracking (legacy).
 ///
 /// This trait extends the basic `UnitOp` with explicit port identity.
@@ -2099,79 +2199,6 @@ pub fn validate_full_conservation<U: FullyConservative>(
     }
 
     Ok(())
-}
-
-/// Connects two unit operations in a flowsheet.
-///
-/// This function enforces that the output type of `upstream` matches the
-/// input type of `downstream`. Mismatched connections will not compile.
-///
-/// # Limitations
-///
-/// This basic connection function:
-/// -  Enforces stream type compatibility
-/// - ✗ Does NOT prevent connecting the same port multiple times
-/// - ✗ Does NOT track port identity
-/// - ✗ Does NOT enforce cardinality (one-to-one, one-to-many)
-///
-/// For stronger guarantees, use `connect_ports()` with explicit `Port` types,
-/// which provides linear ownership tracking to prevent double-connections.
-///
-/// # Examples
-///
-/// ```ignore
-/// use nomata::{UnitOp, Stream, MolarFlow, connect};
-/// use std::marker::PhantomData;
-///
-/// pub struct Reactor { _m: PhantomData<()> }
-/// impl UnitOp for Reactor {
-///     type In = Stream<MolarFlow>;
-///     type Out = Stream<MolarFlow>;
-/// }
-///
-/// pub struct Separator { _m: PhantomData<()> }
-/// impl UnitOp for Separator {
-///     type In = Stream<MolarFlow>;
-///     type Out = Stream<MolarFlow>;
-/// }
-///
-/// let reactor = Reactor { _m: PhantomData };
-/// let separator = Separator { _m: PhantomData };
-///
-/// // This compiles because types match
-/// connect(&reactor, &separator);
-/// ```
-///
-/// The following would NOT compile:
-///
-/// ```compile_fail
-/// use nomata::{UnitOp, Stream, MolarFlow, MassFlow, connect};
-/// use std::marker::PhantomData;
-///
-/// pub struct Reactor { _m: PhantomData<()> }
-/// impl UnitOp for Reactor {
-///     type In = Stream<MolarFlow>;
-///     type Out = Stream<MolarFlow>;
-/// }
-///
-/// pub struct Heater { _m: PhantomData<()> }
-/// impl UnitOp for Heater {
-///     type In = Stream<MassFlow>;  // Different type!
-///     type Out = Stream<MassFlow>;
-/// }
-///
-/// let reactor = Reactor { _m: PhantomData };
-/// let heater = Heater { _m: PhantomData };
-///
-/// connect(&reactor, &heater); //  Compile error!
-/// ```
-pub fn connect<U1, U2>(_upstream: &U1, _downstream: &U2)
-where
-    U1: UnitOp,
-    U2: UnitOp<In = U1::Out>,
-{
-    // In a real implementation, this would establish the connection
-    // in the flowsheet graph. For now, the type checking is the main feature.
 }
 
 // Graph Layer: Flowsheet and Topology

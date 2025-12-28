@@ -205,11 +205,20 @@ impl<P: PortState> Pump<Uninitialized, P> {
 impl<P: PortState> Pump<Initialized, P> {
     /// Computes pump head and power. Only available for fully initialized pump.
     pub fn compute_pumping(&mut self) {
-        let p1 = self.inlet_pressure.as_ref().expect("inlet_pressure should be set for Initialized pump").get();
+        let p1 = self
+            .inlet_pressure
+            .as_ref()
+            .expect("inlet_pressure should be set for Initialized pump")
+            .get();
         let p2 = self.outlet_pressure.get();
         let rho = self.density.as_ref().expect("density should be set for Initialized pump").get();
-        let q = self.volumetric_flow.as_ref().expect("volumetric_flow should be set for Initialized pump").get();
-        let eta = self.efficiency.as_ref().expect("efficiency should be set for Initialized pump").get();
+        let q = self
+            .volumetric_flow
+            .as_ref()
+            .expect("volumetric_flow should be set for Initialized pump")
+            .get();
+        let eta =
+            self.efficiency.as_ref().expect("efficiency should be set for Initialized pump").get();
 
         // Gravitational acceleration (m/s^2)
         const G: f64 = 9.80665;
@@ -230,7 +239,11 @@ impl<P: PortState> Pump<Initialized, P> {
         temp: f64,
         pure: Pure,
     ) -> Result<(), crate::thermodynamics::ThermoError> {
-        let pressure = self.inlet_pressure.as_ref().expect("inlet_pressure should be set for Initialized pump").get();
+        let pressure = self
+            .inlet_pressure
+            .as_ref()
+            .expect("inlet_pressure should be set for Initialized pump")
+            .get();
         let fluid_obj = Fluid::new(pure);
         let props = fluid_obj.props_pt(pressure, temp)?;
         self.density = Some(Var::new(props.density));
@@ -302,6 +315,15 @@ impl<C, P: PortState> HasPorts for Pump<C, P> {
     }
 }
 
+/// Compile-time port specification for Pump.
+///
+/// Enables type-safe connections with const generic port indices.
+impl<C, P: PortState> PortSpec for Pump<C, P> {
+    const INPUT_COUNT: usize = 1;
+    const OUTPUT_COUNT: usize = 1;
+    const STREAM_TYPE: &'static str = "MassFlow";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,10 +332,31 @@ mod tests {
     fn test_pump_creation() {
         let pump: Pump<Initialized> = Pump::new().with_configuration(101325.0, 0.001, 0.75, 1000.0);
 
-        assert_eq!(pump.inlet_pressure.as_ref().expect("inlet_pressure should be set after with_configuration").get(), 101325.0);
-        assert_eq!(pump.volumetric_flow.as_ref().expect("volumetric_flow should be set after with_configuration").get(), 0.001);
-        assert_eq!(pump.efficiency.as_ref().expect("efficiency should be set after with_configuration").get(), 0.75);
-        assert_eq!(pump.density.as_ref().expect("density should be set after with_configuration").get(), 1000.0);
+        assert_eq!(
+            pump.inlet_pressure
+                .as_ref()
+                .expect("inlet_pressure should be set after with_configuration")
+                .get(),
+            101325.0
+        );
+        assert_eq!(
+            pump.volumetric_flow
+                .as_ref()
+                .expect("volumetric_flow should be set after with_configuration")
+                .get(),
+            0.001
+        );
+        assert_eq!(
+            pump.efficiency
+                .as_ref()
+                .expect("efficiency should be set after with_configuration")
+                .get(),
+            0.75
+        );
+        assert_eq!(
+            pump.density.as_ref().expect("density should be set after with_configuration").get(),
+            1000.0
+        );
     }
 
     #[test]

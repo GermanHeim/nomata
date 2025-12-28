@@ -640,6 +640,15 @@ impl<K, T, P: crate::PortState> HasPorts for CSTR<K, T, P> {
     }
 }
 
+/// Compile-time port specification for CSTR.
+///
+/// Enables type-safe connections with const generic port indices.
+impl<K, T, P: crate::PortState> PortSpec for CSTR<K, T, P> {
+    const INPUT_COUNT: usize = 1;
+    const OUTPUT_COUNT: usize = 1;
+    const STREAM_TYPE: &'static str = "MolarFlow";
+}
+
 /// UnitOp implementation with equation harvesting.
 #[cfg(not(feature = "autodiff"))]
 impl<K, Thermo, P: crate::PortState> UnitOp for CSTR<K, Thermo, P> {

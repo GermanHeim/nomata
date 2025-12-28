@@ -460,6 +460,15 @@ impl<H, C> HasPorts for HeatExchanger<H, C> {
     }
 }
 
+/// Compile-time port specification for HeatExchanger.
+///
+/// Enables type-safe connections with const generic port indices.
+impl<H, C> PortSpec for HeatExchanger<H, C> {
+    const INPUT_COUNT: usize = 2;
+    const OUTPUT_COUNT: usize = 2;
+    const STREAM_TYPE: &'static str = "MolarFlow";
+}
+
 /// UnitOp implementation for HeatExchanger.
 impl<H, C> UnitOp for HeatExchanger<H, C> {
     type In = Stream<MolarFlow>;

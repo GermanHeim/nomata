@@ -532,6 +532,15 @@ impl<E, S> HasPorts for FlashSeparator<E, S> {
     }
 }
 
+/// Compile-time port specification for FlashSeparator.
+///
+/// Enables type-safe connections with const generic port indices.
+impl<E, S> PortSpec for FlashSeparator<E, S> {
+    const INPUT_COUNT: usize = 1;
+    const OUTPUT_COUNT: usize = 2;
+    const STREAM_TYPE: &'static str = "MolarFlow";
+}
+
 /// UnitOp implementation for FlashSeparator.
 #[cfg(not(feature = "autodiff"))]
 impl<E, S> UnitOp for FlashSeparator<E, S> {

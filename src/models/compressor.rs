@@ -361,6 +361,15 @@ impl<C, P: PortState> HasPorts for Compressor<C, P> {
     }
 }
 
+/// Compile-time port specification for Compressor.
+///
+/// Enables type-safe connections with const generic port indices.
+impl<C, P: PortState> PortSpec for Compressor<C, P> {
+    const INPUT_COUNT: usize = 1;
+    const OUTPUT_COUNT: usize = 1;
+    const STREAM_TYPE: &'static str = "MolarFlow";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

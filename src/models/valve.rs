@@ -173,7 +173,8 @@ impl<P: PortState> Valve<Initialized, P> {
         self.pressure_drop = Var::new(pressure_drop);
 
         let cv = self.cv.as_ref().expect("cv should be set for Initialized valve").get();
-        let opening = self.opening.as_ref().expect("opening should be set for Initialized valve").get();
+        let opening =
+            self.opening.as_ref().expect("opening should be set for Initialized valve").get();
 
         // F = Cv * opening * sqrt(dP)
         let flow = cv * opening * pressure_drop.abs().sqrt();
@@ -219,6 +220,15 @@ impl<C, P: PortState> HasPorts for Valve<C, P> {
     fn output_ports(&self) -> Vec<NamedPort> {
         vec![NamedPort::output("outlet", "MassFlow")]
     }
+}
+
+/// Compile-time port specification for Valve.
+///
+/// Enables type-safe connections with const generic port indices.
+impl<C, P: PortState> PortSpec for Valve<C, P> {
+    const INPUT_COUNT: usize = 1;
+    const OUTPUT_COUNT: usize = 1;
+    const STREAM_TYPE: &'static str = "MassFlow";
 }
 
 #[cfg(test)]

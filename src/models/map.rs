@@ -17,7 +17,8 @@
 
 use crate::{
     Algebraic, ComponentMapping, EquationSystem, EquationVars, HasPorts, MappingDirection,
-    MolarFlow, NamedPort, ResidualFunction, Stream, TimeDomain, UnitOp, Var, VariableRegistry,
+    MolarFlow, NamedPort, PortSpec, ResidualFunction, Stream, TimeDomain, UnitOp, Var,
+    VariableRegistry,
 };
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -255,6 +256,15 @@ impl<T: TimeDomain> HasPorts for MAP<T> {
     fn output_ports(&self) -> Vec<NamedPort> {
         vec![NamedPort::output("outlet", "MolarFlow")]
     }
+}
+
+/// Compile-time port specification for MAP.
+///
+/// Enables type-safe connections with const generic port indices.
+impl<T: TimeDomain> PortSpec for MAP<T> {
+    const INPUT_COUNT: usize = 1;
+    const OUTPUT_COUNT: usize = 1;
+    const STREAM_TYPE: &'static str = "MolarFlow";
 }
 
 /// UnitOp implementation for MAP.

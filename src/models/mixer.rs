@@ -212,6 +212,15 @@ impl<const N: usize, I> HasPorts for Mixer<N, I> {
     }
 }
 
+/// Compile-time port specification for Mixer.
+///
+/// Enables type-safe connections with const generic port indices.
+impl<const N: usize, I> PortSpec for Mixer<N, I> {
+    const INPUT_COUNT: usize = N;
+    const OUTPUT_COUNT: usize = 1;
+    const STREAM_TYPE: &'static str = "MolarFlow";
+}
+
 /// UnitOp implementation for Mixer.
 ///
 /// Note: Mixers are typically steady-state devices (no accumulation),

@@ -555,6 +555,15 @@ impl<K, G, Thermo, P: PortState> HasPorts for PFR<K, G, Thermo, P> {
     }
 }
 
+/// Compile-time port specification for PFR.
+///
+/// Enables type-safe connections with const generic port indices.
+impl<K, G, Thermo, P: PortState> PortSpec for PFR<K, G, Thermo, P> {
+    const INPUT_COUNT: usize = 1;
+    const OUTPUT_COUNT: usize = 1;
+    const STREAM_TYPE: &'static str = "MolarFlow";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,7 +575,10 @@ mod tests {
             .with_geometry(10.0, 0.1, 20)
             .with_thermodynamics(-50000.0, 1000.0, 4184.0);
 
-        assert_eq!(pfr.length.as_ref().expect("length should be set after with_geometry").get(), 10.0);
+        assert_eq!(
+            pfr.length.as_ref().expect("length should be set after with_geometry").get(),
+            10.0
+        );
         assert_eq!(pfr.area.as_ref().expect("area should be set after with_geometry").get(), 0.1);
         assert_eq!(pfr.n_segments.unwrap(), 20);
         assert_eq!(pfr.concentration_profile.len(), 20);

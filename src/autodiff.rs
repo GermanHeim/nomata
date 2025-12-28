@@ -98,11 +98,11 @@ where
     Jacobian { n_equations: n_eqs, n_variables: n_vars, entries }
 }
 
-/// Computes the Jacobian matrix for an equation system using numerical differentiation.
+/// Computes the Jacobian matrix for an equation system using central numerical differentiation.
 ///
-/// Since the equation system uses closures that operate on `HashMap<String, f64>`,
-/// we cannot directly apply automatic differentiation. This function uses finite
-/// differences to approximate the Jacobian.
+/// This function uses central finite differences: (f(x+h) - f(x-h)) / (2h).
+/// While it requires two evaluations per variable, it provides second-order accuracy O(h^2),
+/// which is more stable for complex chemical process models.
 ///
 /// # Arguments
 ///
@@ -112,54 +112,55 @@ where
 ///
 /// # Returns
 ///
-/// Dense Jacobian matrix ∂F/∂x as `Vec<Vec<f64>>`
-///
-/// # Note
-///
-/// For true automatic differentiation with closures, consider writing the equations
-/// as functions of `Dual64` and using `compute_jacobian` directly.
+/// A `Jacobian` struct containing the partial derivatives.
 pub fn compute_jacobian_numerical<T: crate::TimeDomain>(
     system: &crate::EquationSystem<T>,
     var_names: &[String],
     state: &[f64],
-) -> Vec<Vec<f64>> {
+) -> Jacobian {
     use std::collections::HashMap;
 
     let n_eqs = system.total_equations();
     let n_vars = state.len();
-    let eps = 1e-8; // Finite difference step size
+    let base_eps = 1e-8;
 
-    let mut jacobian = vec![vec![0.0; n_vars]; n_eqs];
+    let mut jacobian = Jacobian::zeros(n_eqs, n_vars);
 
-    // Build base state HashMap
+    // Build state HashMap helper
     let build_state = |values: &[f64]| -> HashMap<String, f64> {
         var_names.iter().cloned().zip(values.iter().copied()).collect()
     };
 
-    // Evaluate residuals at base state
-    let base_state = build_state(state);
-    let base_residuals: Vec<f64> = system
-        .differential_equations()
-        .iter()
-        .chain(system.algebraic_equations().iter())
-        .map(|eq| eq.evaluate(&base_state))
-        .collect();
-
-    // For each variable, compute ∂F/∂x_i using central differences
-    for i in 0..n_vars {
-        let mut state_plus = state.to_vec();
-        state_plus[i] += eps;
-        let state_plus_map = build_state(&state_plus);
-
-        let residuals_plus: Vec<f64> = system
+    // Helper to evaluate all residuals at a given point
+    let evaluate_all = |vals: &[f64]| -> Vec<f64> {
+        let state_map = build_state(vals);
+        system
             .differential_equations()
             .iter()
             .chain(system.algebraic_equations().iter())
-            .map(|eq| eq.evaluate(&state_plus_map))
-            .collect();
+            .map(|eq| eq.evaluate(&state_map))
+            .collect()
+    };
+
+    // For each variable, compute partialF/partialx_i using central differences
+    for i in 0..n_vars {
+        // Scale epsilon relative to variable magnitude
+        let h = base_eps.max(base_eps * state[i].abs());
+
+        // Evaluation at x + h
+        let mut state_plus = state.to_vec();
+        state_plus[i] += h;
+        let residuals_plus = evaluate_all(&state_plus);
+
+        // Evaluation at x - h
+        let mut state_minus = state.to_vec();
+        state_minus[i] -= h;
+        let residuals_minus = evaluate_all(&state_minus);
 
         for j in 0..n_eqs {
-            jacobian[j][i] = (residuals_plus[j] - base_residuals[j]) / eps;
+            // Central difference formula: (f(x+h) - f(x-h)) / (2h)
+            let deriv = (residuals_plus[j] - residuals_minus[j]) / (2.0 * h);
+            jacobian.set(j, i, deriv);
         }
     }
 

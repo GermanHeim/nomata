@@ -122,7 +122,7 @@ pub fn compute_jacobian_numerical<T: crate::TimeDomain>(
 
     let n_eqs = system.total_equations();
     let n_vars = state.len();
-    let base_eps = 1e-8;
+    let base_eps: f64 = 1e-8;
 
     let mut jacobian = Jacobian::zeros(n_eqs, n_vars);
 

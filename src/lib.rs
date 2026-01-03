@@ -70,6 +70,10 @@ pub mod solvers;
 #[cfg(feature = "thermodynamics")]
 pub mod thermodynamics;
 
+// Reexports from differential-equations crate for ODE solving
+#[cfg(feature = "solvers")]
+pub use differential_equations::methods::{ExplicitRungeKutta, ImplicitRungeKutta};
+
 /// Variable Registry: Shared State Management
 /// Unique identifier for a variable in the registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

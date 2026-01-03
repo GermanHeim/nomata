@@ -9,6 +9,7 @@ readme = "README.md"
 repository = "https://github.com/GermanHeim/nomata"
 keywords = ["chemical-engineering", "process-modeling", "type-safety", "dsl"]
 categories = ["science", "simulation"]
+exclude = ["/media"]
 
 [lib]
 name = "nomata"

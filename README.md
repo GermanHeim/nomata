@@ -1,5 +1,13 @@
 ﻿# Nomata: Typed Process Modeling for Chemical Engineering
 
+<p align="center">
+    <img
+        width="500"
+        src="https://raw.githubusercontent.com/GermanHeim/nomata/main/media/logo.png"
+        alt="Nomata logo"
+    />
+</p>
+
 A correct-by-construction process modeling framework that leverages Rust's type system to enforce structural correctness at compile time.
 
 Nomata is an embedded domain-specific language (EDSL) for chemical process modeling that prevents invalid process models from being representable. Instead of catching modeling errors at runtime, Nomata makes illegal flowsheets fail to compile.
@@ -301,8 +309,8 @@ use nomata::{UnitOp, Flowsheet, Dynamic, models::CSTR, Stream, MolarFlow};
 let mut flowsheet = Flowsheet::<Dynamic>::new();
 let reactor = CSTR::new(100.0, 1.0, 350.0);
 
-flowsheet.add_unit("CSTR-101");
-flowsheet.harvest_equations("CSTR-101", &reactor); // Automatic!
+flowsheet.add_unit("CSTR-101", reactor);
+flowsheet.harvest_equations(); // Automatic!
 
 // Equations are now ready for solving
 assert_eq!(flowsheet.equations().total_equations(), 5);

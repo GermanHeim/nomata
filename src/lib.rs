@@ -67,8 +67,6 @@ pub mod autodiff;
 #[cfg(feature = "solvers")]
 pub mod solvers;
 
-pub mod integration;
-
 #[cfg(feature = "thermodynamics")]
 pub mod thermodynamics;
 

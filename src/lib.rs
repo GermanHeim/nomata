@@ -270,6 +270,7 @@ pub trait TimeDomain {
 ///
 /// All derivatives with respect to time are zero, and the system is at
 /// equilibrium or steady operation.
+#[derive(Debug)]
 pub struct Steady;
 impl TimeDomain for Steady {
     const IS_STEADY: bool = true;
@@ -279,6 +280,7 @@ impl TimeDomain for Steady {
 ///
 /// Differential variables have non-zero time derivatives, and the system
 /// state changes according to balance equations.
+#[derive(Debug)]
 pub struct Dynamic;
 impl TimeDomain for Dynamic {
     const IS_STEADY: bool = false;

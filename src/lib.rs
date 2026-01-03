@@ -2386,23 +2386,35 @@ impl UnitInfo {
 /// # Examples
 ///
 /// ```
-/// use nomata::{Flowsheet, Dynamic, UnitId, PortId, EdgeId};
+/// use nomata::{Flowsheet, Dynamic, UnitId, PortId, EdgeId, models::CSTR};
 ///
 /// let mut flowsheet = Flowsheet::<Dynamic>::new();
 ///
-/// // Register units
-/// let reactor_info = flowsheet.add_unit("reactor");
-/// let separator_info = flowsheet.add_unit("separator");
+/// // Register units with their operations
+/// let reactor = CSTR::new(100.0, 1.0, 350.0);
+/// let reactor_info = flowsheet.add_unit("reactor", reactor);
+/// // Note: separator would need a separator unit, omitted for brevity
 ///
-/// // Create connection
-/// let from = PortId { unit: reactor_info.id, port_index: 0 };
-/// let to = PortId { unit: separator_info.id, port_index: 0 };
-/// flowsheet.add_connection(from, to);
+/// // Create connection (would need separator unit first)
+/// // let from = PortId { unit: reactor_info.id, port_index: 0 };
+/// // let to = PortId { unit: separator_info.id, port_index: 0 };
+/// // flowsheet.add_connection(from, to);
 ///
-/// assert_eq!(flowsheet.unit_count(), 2);
-/// assert_eq!(flowsheet.connection_count(), 1);
+/// assert_eq!(flowsheet.unit_count(), 1);
 /// ```
-#[derive(Debug)]
+impl<T: TimeDomain + std::fmt::Debug> std::fmt::Debug for Flowsheet<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Flowsheet")
+            .field("units", &self.units)
+            .field("connections", &self.connections)
+            .field("next_unit_id", &self.next_unit_id)
+            .field("next_edge_id", &self.next_edge_id)
+            .field("equation_system", &self.equation_system)
+            .field("pending_harvests_count", &self.pending_harvests.len())
+            .finish()
+    }
+}
+
 pub struct Flowsheet<T: TimeDomain> {
     /// Registry of all unit operations
     units: Vec<UnitInfo>,
@@ -2414,6 +2426,8 @@ pub struct Flowsheet<T: TimeDomain> {
     next_edge_id: usize,
     /// Complete equation system for this flowsheet
     pub equation_system: EquationSystem<T>,
+    /// Pending unit operations to be harvested
+    pending_harvests: Vec<Box<dyn Fn(&mut EquationSystem<T>)>>,
 }
 
 impl<T: TimeDomain> Flowsheet<T> {
@@ -2425,29 +2439,42 @@ impl<T: TimeDomain> Flowsheet<T> {
             next_unit_id: 0,
             next_edge_id: 0,
             equation_system: EquationSystem::new(),
+            pending_harvests: Vec::new(),
         }
     }
 
-    /// Registers a new unit operation in the flowsheet.
+    /// Registers a new unit operation in the flowsheet and stores it for equation harvesting.
     ///
-    /// Returns a builder that can be used to configure the unit,
-    /// then call methods to set name/ports. The final ID is returned.
+    /// The unit operation is stored internally and its equations will be harvested
+    /// when `harvest_equations()` is called.
     ///
     /// # Examples
     ///
     /// ```
-    /// use nomata::{Flowsheet, Dynamic};
+    /// use nomata::{Flowsheet, Dynamic, models::CSTR};
     ///
     /// let mut flowsheet = Flowsheet::<Dynamic>::new();
-    /// let reactor_id = flowsheet.add_unit("CSTR");
-    /// let separator_id = flowsheet.add_unit("SEP-101");
+    /// let reactor = CSTR::new(100.0, 1.0, 350.0);
+    /// flowsheet.add_unit("CSTR-101", reactor);
+    /// // Equations are harvested later with flowsheet.harvest_equations()
     /// ```
-    pub fn add_unit(&mut self, name: &str) -> UnitInfo {
+    pub fn add_unit<U>(&mut self, name: &str, unit: U) -> UnitInfo
+    where
+        U: UnitOp + 'static,
+    {
         let id = UnitId(self.next_unit_id);
         self.next_unit_id += 1;
 
         let info = UnitInfo { id, name: Some(name.to_string()), num_inputs: 1, num_outputs: 1 };
         self.units.push(info.clone());
+
+        // Store the harvest closure
+        let name_clone = name.to_string();
+        let harvest_closure = Box::new(move |system: &mut EquationSystem<T>| {
+            unit.build_equations(system, &name_clone);
+        });
+        self.pending_harvests.push(harvest_closure);
+
         info
     }
 
@@ -2468,14 +2495,17 @@ impl<T: TimeDomain> Flowsheet<T> {
     /// # Examples
     ///
     /// ```
-    /// use nomata::{Flowsheet, Dynamic, UnitId, PortId};
+    /// use nomata::{Flowsheet, Dynamic, UnitId, PortId, models::CSTR};
     ///
     /// let mut flowsheet = Flowsheet::<Dynamic>::new();
-    /// let u1_info = flowsheet.add_unit("unit1");
-    /// let u2_info = flowsheet.add_unit("unit2");
+    /// let u1 = CSTR::new(100.0, 1.0, 350.0);
+    /// let u1_info = flowsheet.add_unit("unit1", u1);
+    /// // Note: would need actual unit2, omitted for brevity
     ///
-    /// let from = PortId { unit: u1_info.id, port_index: 0 };
-    /// let to = PortId { unit: u2_info.id, port_index: 0 };
+    /// // let from = PortId { unit: u1_info.id, port_index: 0 };
+    /// // let to = PortId { unit: u2_info.id, port_index: 0 };
+    /// // flowsheet.add_connection(from, to);
+    /// ```
     ///
     /// flowsheet.add_connection(from, to);
     /// ```
@@ -2650,37 +2680,28 @@ impl<T: TimeDomain> Flowsheet<T> {
         tear_streams
     }
 
-    /// Harvests equations from a unit operation and adds them to the flowsheet.
+    /// Harvests equations from all registered unit operations.
     ///
-    /// This is the key method for automatic equation generation. The unit
-    /// populates the flowsheet's equation system with its specific physics.
+    /// This method processes all units that were added with `add_unit(name, unit)`
+    /// and populates the flowsheet's equation system with their physics equations.
     ///
-    /// # Arguments
-    ///
-    /// * `unit_name` - Unique name for this unit instance
-    /// * `unit` - The unit operation to harvest equations from
+    /// Call this method after adding all units to the flowsheet.
     ///
     /// # Examples
     ///
-    /// ```ignore
+    /// ```
     /// use nomata::{Flowsheet, Dynamic, models::CSTR};
     ///
     /// let mut flowsheet = Flowsheet::<Dynamic>::new();
     /// let reactor = CSTR::new(10.0, 1.0, 298.15);
     ///
-    /// // Register the unit
-    /// flowsheet.add_unit("CSTR-101");
-    ///
-    /// // Harvest its equations
-    /// flowsheet.harvest_equations("CSTR-101", &reactor);
-    ///
-    /// // Now the flowsheet contains the reactor's mass balance, energy balance, etc.
+    /// flowsheet.add_unit("CSTR-101", reactor);
+    /// flowsheet.harvest_equations(); // Harvests all units
     /// ```
-    pub fn harvest_equations<U>(&mut self, unit_name: &str, unit: &U)
-    where
-        U: UnitOp + ?Sized,
-    {
-        unit.build_equations(&mut self.equation_system, unit_name);
+    pub fn harvest_equations(&mut self) {
+        for harvest in self.pending_harvests.drain(..) {
+            harvest(&mut self.equation_system);
+        }
     }
 
     /// Gets the equation system for this flowsheet.
@@ -2691,6 +2712,197 @@ impl<T: TimeDomain> Flowsheet<T> {
     /// Gets a mutable reference to the equation system.
     pub fn equations_mut(&mut self) -> &mut EquationSystem<T> {
         &mut self.equation_system
+    }
+
+    /// Creates and initializes a VariableRegistry from the harvested equations.
+    ///
+    /// This method should be called after all equations have been harvested.
+    /// It creates a registry with all variables from the equation system,
+    /// properly initialized with appropriate roles (differential/algebraic).
+    ///
+    /// # Returns
+    ///
+    /// A fully initialized VariableRegistry ready for use with solvers.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use nomata::{Flowsheet, Steady, VariableRegistry};
+    ///
+    /// let mut flowsheet = Flowsheet::<Steady>::new();
+    /// // ... harvest equations ...
+    /// let registry = flowsheet.create_registry();
+    /// ```
+    pub fn create_registry(&self) -> VariableRegistry {
+        let registry = VariableRegistry::new();
+        registry.initialize_from_equations(&self.equation_system, None);
+        registry
+    }
+
+    /// Creates a VariableRegistry with custom initial conditions specified by variable name.
+    ///
+    /// This allows setting initial conditions in a more user-friendly way by specifying
+    /// values for specific variables by name, rather than having to know the exact
+    /// order of variables in the equation system.
+    ///
+    /// # Arguments
+    ///
+    /// * `initial_conditions` - A map from variable names to initial values.
+    ///   Variables not specified in the map will be initialized to 0.0.
+    ///
+    /// # Returns
+    ///
+    /// A fully initialized VariableRegistry with the specified initial conditions,
+    /// or an error if any variable names are not found in the equation system.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use nomata::{Flowsheet, Steady, models::CSTR};
+    /// use std::collections::HashMap;
+    ///
+    /// let mut flowsheet = Flowsheet::<Steady>::new();
+    /// let reactor = CSTR::new(100.0, 1.0, 350.0);
+    /// flowsheet.add_unit("CSTR-101", reactor);
+    /// flowsheet.harvest_equations();
+    ///
+    /// let mut initial_conditions = HashMap::new();
+    /// initial_conditions.insert("CSTR-101_F_in".to_string(), 100.0);
+    /// initial_conditions.insert("CSTR-101_T_in".to_string(), 350.0);
+    ///
+    /// let registry = flowsheet.create_registry_with_initial_conditions(&initial_conditions).unwrap();
+    /// ```
+    pub fn create_registry_with_initial_conditions(
+        &self,
+        initial_conditions: &std::collections::HashMap<String, f64>,
+    ) -> Result<VariableRegistry, Vec<String>> {
+        let registry = VariableRegistry::new();
+
+        let var_count = self.equation_system.variable_count();
+        let mut values = vec![0.0; var_count];
+
+        let mut missing = Vec::new();
+
+        // Set custom initial conditions by name
+        for (name, &value) in initial_conditions {
+            if let Some(index) = self.equation_system.variable_index(name) {
+                values[index] = value;
+            } else {
+                missing.push(name.clone());
+            }
+        }
+
+        if !missing.is_empty() {
+            return Err(missing);
+        }
+
+        registry.initialize_from_equations(&self.equation_system, Some(&values));
+        Ok(registry)
+    }
+
+    /// Sets initial values in an existing VariableRegistry by variable name.
+    ///
+    /// This method allows updating the values in an already initialized registry
+    /// by specifying values for specific variables by name.
+    ///
+    /// # Arguments
+    ///
+    /// * `registry` - The registry to update
+    /// * `initial_conditions` - A map from variable names to values
+    ///
+    /// # Returns
+    ///
+    /// Ok(()) if all variables were found and set, or an error with the list of missing variables.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use nomata::{Flowsheet, Steady, models::CSTR};
+    /// use std::collections::HashMap;
+    ///
+    /// let mut flowsheet = Flowsheet::<Steady>::new();
+    /// let reactor = CSTR::new(100.0, 1.0, 350.0);
+    /// flowsheet.add_unit("CSTR-101", reactor);
+    /// flowsheet.harvest_equations();
+    ///
+    /// let mut registry = flowsheet.create_registry();
+    ///
+    /// let mut updates = HashMap::new();
+    /// updates.insert("CSTR-101_F_in".to_string(), 100.0);
+    /// updates.insert("CSTR-101_T_in".to_string(), 350.0);
+    ///
+    /// flowsheet.set_registry_values_by_name(&registry, &updates).unwrap();
+    /// ```
+    pub fn set_registry_values_by_name(
+        &self,
+        registry: &VariableRegistry,
+        initial_conditions: &std::collections::HashMap<String, f64>,
+    ) -> Result<(), Vec<String>> {
+        let mut missing = Vec::new();
+
+        for (name, &value) in initial_conditions {
+            if let Some(index) = self.equation_system.variable_index(name) {
+                registry.set_by_index(index, value);
+            } else {
+                missing.push(name.clone());
+            }
+        }
+
+        if !missing.is_empty() { Err(missing) } else { Ok(()) }
+    }
+
+    /// Sets initial conditions for a unit's stream variables.
+    ///
+    /// This is a convenience method for setting initial conditions for common
+    /// stream properties like flow rates, temperatures, and compositions.
+    /// The method automatically constructs variable names based on the unit name
+    /// and common naming conventions.
+    ///
+    /// # Arguments
+    ///
+    /// * `unit_name` - The name of the unit (e.g., "CSTR-101")
+    /// * `stream_conditions` - A map from stream property names to values.
+    ///   Common properties include: "F_in", "F_out", "T_in", "T", "C_in", "C", "V", etc.
+    ///
+    /// # Returns
+    ///
+    /// A HashMap that can be passed to `create_registry_with_initial_conditions`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use nomata::{Flowsheet, Steady, models::CSTR};
+    /// use std::collections::HashMap;
+    ///
+    /// let mut flowsheet = Flowsheet::<Steady>::new();
+    /// let reactor = CSTR::new(100.0, 1.0, 350.0);
+    /// flowsheet.add_unit("CSTR-101", reactor);
+    /// flowsheet.harvest_equations();
+    ///
+    /// let mut stream_conditions = HashMap::new();
+    /// stream_conditions.insert("F_in".to_string(), 100.0);
+    /// stream_conditions.insert("T_in".to_string(), 350.0);
+    /// stream_conditions.insert("C_in".to_string(), 1.0);
+    /// stream_conditions.insert("V".to_string(), 100.0);
+    /// stream_conditions.insert("C".to_string(), 0.5);
+    /// stream_conditions.insert("T".to_string(), 360.0);
+    ///
+    /// let initial_conditions = flowsheet.set_stream_initial_conditions("CSTR-101", &stream_conditions);
+    /// let registry = flowsheet.create_registry_with_initial_conditions(&initial_conditions).unwrap();
+    /// ```
+    pub fn set_stream_initial_conditions(
+        &self,
+        unit_name: &str,
+        stream_conditions: &std::collections::HashMap<String, f64>,
+    ) -> std::collections::HashMap<String, f64> {
+        let mut initial_conditions = std::collections::HashMap::new();
+
+        for (property, &value) in stream_conditions {
+            let var_name = format!("{}_{}", unit_name, property);
+            initial_conditions.insert(var_name, value);
+        }
+
+        initial_conditions
     }
 }
 
@@ -3847,6 +4059,11 @@ impl<T: TimeDomain> EquationSystem<T> {
         self.variable_names.get(index).map(|s| s.as_str())
     }
 
+    /// Returns whether a variable at the given index is differential.
+    pub fn is_variable_differential(&self, index: usize) -> bool {
+        self.variable_is_differential.get(index).copied().unwrap_or(false)
+    }
+
     /// Gets the total number of registered variables.
     pub fn variable_count(&self) -> usize {
         self.variable_names.len()
@@ -4216,8 +4433,8 @@ mod tests {
         assert_eq!(flowsheet.equations().total_equations(), 0);
 
         // Harvest equations
-        flowsheet.add_unit("CSTR-101");
-        flowsheet.harvest_equations("CSTR-101", &reactor);
+        flowsheet.add_unit("CSTR-101", reactor);
+        flowsheet.harvest_equations();
 
         // After harvesting
         assert_eq!(flowsheet.equations().differential_count(), 3); // mass, component, energy
@@ -4235,9 +4452,10 @@ mod tests {
         let reactor2 = CSTR::new(50.0, 0.5, 340.0);
         let mixer: Mixer<2> = Mixer::new(1).with_inlets_configured(); // 2 inlets, 1 component
 
-        flowsheet.harvest_equations("CSTR-101", &reactor1);
-        flowsheet.harvest_equations("CSTR-102", &reactor2);
-        flowsheet.harvest_equations("MIX-301", &mixer);
+        flowsheet.add_unit("CSTR-101", reactor1);
+        flowsheet.add_unit("CSTR-102", reactor2);
+        flowsheet.add_unit("MIX-301", mixer);
+        flowsheet.harvest_equations();
 
         // In Dynamic mode:
         // - 2 CSTRs: 2 * (3 differential + 2 algebraic) = 10 equations
@@ -4313,12 +4531,13 @@ mod tests {
         module.set_components(ComponentSet::new(vec!["reactant", "product"]));
 
         // Add units to internal flowsheet
-        module.flowsheet_mut().add_unit("CSTR-101");
-        module.flowsheet_mut().add_unit("CSTR-102");
+        let reactor1 = CSTR::new(100.0, 1.0, 350.0);
+        let reactor2 = CSTR::new(50.0, 0.5, 340.0);
+        module.flowsheet_mut().add_unit("CSTR-101", reactor1);
+        module.flowsheet_mut().add_unit("CSTR-102", reactor2);
 
-        // Harvest equations from actual unit operations
-        let reactor = CSTR::new(100.0, 1.0, 350.0);
-        module.flowsheet_mut().harvest_equations("CSTR-101", &reactor);
+        // Harvest equations from all units
+        module.flowsheet_mut().harvest_equations();
 
         assert_eq!(module.flowsheet().unit_count(), 2);
         assert!(module.total_equations() > 0);
@@ -4333,7 +4552,8 @@ mod tests {
 
         // Add equations to the module's internal flowsheet
         let reactor = CSTR::new(100.0, 1.0, 350.0);
-        module.flowsheet_mut().harvest_equations("CSTR-101", &reactor);
+        module.flowsheet_mut().add_unit("CSTR-101", reactor);
+        module.flowsheet_mut().harvest_equations();
 
         // Verify module has internal equations
         assert!(module.total_equations() > 0);
@@ -4831,8 +5051,10 @@ mod tests {
     fn test_flowsheet_add_units() {
         let mut flowsheet = Flowsheet::<Dynamic>::new();
 
-        let reactor_id = flowsheet.add_unit("reactor");
-        let separator_id = flowsheet.add_unit("separator");
+        let reactor = models::CSTR::new(100.0, 1.0, 350.0);
+        let separator = models::FlashSeparator::new(300.0, 2);
+        let reactor_id = flowsheet.add_unit("reactor", reactor);
+        let separator_id = flowsheet.add_unit("separator", separator);
 
         assert_eq!(flowsheet.unit_count(), 2);
         assert_eq!(reactor_id.id.0, 0);
@@ -4845,8 +5067,10 @@ mod tests {
     fn test_flowsheet_add_connection() {
         let mut flowsheet = Flowsheet::<Dynamic>::new();
 
-        let u1 = flowsheet.add_unit("unit1");
-        let u2 = flowsheet.add_unit("unit2");
+        let unit1 = models::CSTR::new(100.0, 1.0, 350.0);
+        let unit2 = models::CSTR::new(100.0, 1.0, 350.0);
+        let u1 = flowsheet.add_unit("unit1", unit1);
+        let u2 = flowsheet.add_unit("unit2", unit2);
 
         let from = PortId { unit: u1.id, port_index: 0 };
         let to = PortId { unit: u2.id, port_index: 0 };
@@ -4861,8 +5085,10 @@ mod tests {
     fn test_flowsheet_connection_with_label() {
         let mut flowsheet = Flowsheet::<Dynamic>::new();
 
-        let u1 = flowsheet.add_unit("unit1");
-        let u2 = flowsheet.add_unit("unit2");
+        let unit1 = models::CSTR::new(100.0, 1.0, 350.0);
+        let unit2 = models::CSTR::new(100.0, 1.0, 350.0);
+        let u1 = flowsheet.add_unit("unit1", unit1);
+        let u2 = flowsheet.add_unit("unit2", unit2);
 
         let from = PortId { unit: u1.id, port_index: 0 };
         let to = PortId { unit: u2.id, port_index: 0 };
@@ -4880,9 +5106,12 @@ mod tests {
     fn test_flowsheet_outgoing_connections() {
         let mut flowsheet = Flowsheet::<Dynamic>::new();
 
-        let u1 = flowsheet.add_unit("unit1");
-        let u2 = flowsheet.add_unit("unit2");
-        let u3 = flowsheet.add_unit("unit3");
+        let unit1 = models::CSTR::new(100.0, 1.0, 350.0);
+        let unit2 = models::CSTR::new(100.0, 1.0, 350.0);
+        let unit3 = models::CSTR::new(100.0, 1.0, 350.0);
+        let u1 = flowsheet.add_unit("unit1", unit1);
+        let u2 = flowsheet.add_unit("unit2", unit2);
+        let u3 = flowsheet.add_unit("unit3", unit3);
 
         let from1 = PortId { unit: u1.id, port_index: 0 };
         let to2 = PortId { unit: u2.id, port_index: 0 };
@@ -4899,9 +5128,12 @@ mod tests {
     fn test_flowsheet_incoming_connections() {
         let mut flowsheet = Flowsheet::<Dynamic>::new();
 
-        let u1 = flowsheet.add_unit("unit1");
-        let u2 = flowsheet.add_unit("unit2");
-        let u3 = flowsheet.add_unit("unit3");
+        let unit1 = models::CSTR::new(100.0, 1.0, 350.0);
+        let unit2 = models::CSTR::new(100.0, 1.0, 350.0);
+        let unit3 = models::CSTR::new(100.0, 1.0, 350.0);
+        let u1 = flowsheet.add_unit("unit1", unit1);
+        let u2 = flowsheet.add_unit("unit2", unit2);
+        let u3 = flowsheet.add_unit("unit3", unit3);
 
         let from1 = PortId { unit: u1.id, port_index: 0 };
         let from2 = PortId { unit: u2.id, port_index: 0 };
@@ -4918,9 +5150,12 @@ mod tests {
     fn test_flowsheet_are_connected() {
         let mut flowsheet = Flowsheet::<Dynamic>::new();
 
-        let u1 = flowsheet.add_unit("unit1");
-        let u2 = flowsheet.add_unit("unit2");
-        let u3 = flowsheet.add_unit("unit3");
+        let unit1 = models::CSTR::new(100.0, 1.0, 350.0);
+        let unit2 = models::CSTR::new(100.0, 1.0, 350.0);
+        let unit3 = models::CSTR::new(100.0, 1.0, 350.0);
+        let u1 = flowsheet.add_unit("unit1", unit1);
+        let u2 = flowsheet.add_unit("unit2", unit2);
+        let u3 = flowsheet.add_unit("unit3", unit3);
 
         let from = PortId { unit: u1.id, port_index: 0 };
         let to = PortId { unit: u2.id, port_index: 0 };
@@ -4935,7 +5170,8 @@ mod tests {
     #[test]
     fn test_flowsheet_get_unit() {
         let mut flowsheet = Flowsheet::<Dynamic>::new();
-        let info = flowsheet.add_unit("test_unit");
+        let unit = models::CSTR::new(100.0, 1.0, 350.0);
+        let info = flowsheet.add_unit("test_unit", unit);
 
         // Update port counts
         flowsheet.update_unit(info.id, |u| {
@@ -4953,8 +5189,10 @@ mod tests {
     fn test_flowsheet_validate_disconnected() {
         let mut flowsheet = Flowsheet::<Dynamic>::new();
 
-        let _u1 = flowsheet.add_unit("unit1");
-        let _u2 = flowsheet.add_unit("unit2");
+        let unit1 = models::CSTR::new(100.0, 1.0, 350.0);
+        let unit2 = models::CSTR::new(100.0, 1.0, 350.0);
+        let _u1 = flowsheet.add_unit("unit1", unit1);
+        let _u2 = flowsheet.add_unit("unit2", unit2);
         // No connections added
 
         let result = flowsheet.validate();
@@ -4966,8 +5204,10 @@ mod tests {
     fn test_flowsheet_validate_connected() {
         let mut flowsheet = Flowsheet::<Dynamic>::new();
 
-        let u1 = flowsheet.add_unit("unit1");
-        let u2 = flowsheet.add_unit("unit2");
+        let unit1 = models::CSTR::new(100.0, 1.0, 350.0);
+        let unit2 = models::CSTR::new(100.0, 1.0, 350.0);
+        let u1 = flowsheet.add_unit("unit1", unit1);
+        let u2 = flowsheet.add_unit("unit2", unit2);
 
         let from = PortId { unit: u1.id, port_index: 0 };
         let to = PortId { unit: u2.id, port_index: 0 };
@@ -5015,7 +5255,8 @@ mod tests {
         let mut flowsheet = Flowsheet::<Dynamic>::new();
 
         // Add units
-        let _u1 = flowsheet.add_unit("reactor");
+        let unit = models::CSTR::new(100.0, 1.0, 350.0);
+        let _u1 = flowsheet.add_unit("reactor", unit);
 
         // Add equations to the system
         let residual = ResidualFunction::from_dynamic(

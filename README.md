@@ -1,8 +1,6 @@
-﻿# Nomata: Typed Process Modeling for Chemical Engineering
-
-<p align="center">
+﻿<p align="center">
     <img
-        width="500"
+        width="800"
         src="https://raw.githubusercontent.com/GermanHeim/nomata/main/media/logo.png"
         alt="Nomata logo"
     />

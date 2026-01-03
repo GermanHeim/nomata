@@ -162,6 +162,12 @@ impl VariableRegistry {
         self.values.borrow_mut()[id.0] = value;
     }
 
+    /// Sets the value of a variable by its index in the registry.
+    pub fn set_by_index(&self, index: usize, value: f64) {
+        assert!(index < self.len(), "Index {} out of bounds (max {})", index, self.len() - 1);
+        self.values.borrow_mut()[index] = value;
+    }
+
     /// Gets the role of a variable (for debugging/validation).
     pub fn get_role(&self, id: VarId) -> &'static str {
         self.roles.borrow()[id.0]
@@ -186,6 +192,67 @@ impl VariableRegistry {
     pub fn set_all_values(&self, values: &[f64]) {
         assert_eq!(values.len(), self.len(), "Value vector length mismatch");
         self.values.borrow_mut().copy_from_slice(values);
+    }
+
+    /// Initializes the registry from an equation system.
+    ///
+    /// Creates variables in the registry corresponding to all variables
+    /// in the equation system, with appropriate roles (differential/algebraic).
+    ///
+    /// # Arguments
+    /// * `equations` - The equation system to initialize from
+    /// * `initial_conditions` - Optional initial values for all variables.
+    ///   If `None`, all variables are initialized to 0.0.
+    ///   Must have exactly `equations.variable_count()` elements if provided.
+    ///
+    /// # Panics
+    /// Panics if the registry is not empty or if `initial_conditions` length
+    /// doesn't match the number of variables in the equation system.
+    ///
+    /// # Examples
+    /// ```ignore
+    /// let registry = VariableRegistry::new();
+    /// registry.initialize_from_equations(flowsheet.equations(), None);
+    ///
+    /// // For custom initial conditions, use the stream-level initial conditions API:
+    /// use std::collections::HashMap;
+    /// let mut conditions = HashMap::new();
+    /// conditions.insert("F_in".to_string(), 10.0);
+    /// conditions.insert("T".to_string(), 350.0);
+    /// let initial_conditions = flowsheet.set_stream_initial_conditions("CSTR-101", &conditions);
+    /// let registry = flowsheet.create_registry_with_initial_conditions(&initial_conditions);
+    /// ```
+    pub fn initialize_from_equations<T: TimeDomain>(
+        &self,
+        equations: &EquationSystem<T>,
+        initial_conditions: Option<&[f64]>,
+    ) {
+        // Validate registry is empty
+        assert!(self.is_empty(), "Registry must be empty when initializing from equations");
+
+        let var_count = equations.variable_count();
+
+        // Validate initial conditions if provided
+        if let Some(conditions) = initial_conditions {
+            assert_eq!(
+                conditions.len(),
+                var_count,
+                "Initial conditions length ({}) must match variable count ({})",
+                conditions.len(),
+                var_count
+            );
+        }
+
+        // Create variables with appropriate roles and initial values
+        for i in 0..var_count {
+            let initial_value = initial_conditions.map(|conditions| conditions[i]).unwrap_or(0.0);
+
+            if equations.is_variable_differential(i) {
+                self.create_differential(initial_value);
+            } else {
+                self.create_algebraic(initial_value);
+            }
+        }
     }
 }
 

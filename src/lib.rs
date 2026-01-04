@@ -2453,9 +2453,6 @@ impl<T: TimeDomain> Flowsheet<T> {
     /// // let to = PortId { unit: u2_info.id, port_index: 0 };
     /// // flowsheet.add_connection(from, to);
     /// ```
-    ///
-    /// flowsheet.add_connection(from, to);
-    /// ```
     pub fn add_connection(&mut self, from: PortId, to: PortId) -> &mut Connection {
         let edge_id = EdgeId(self.next_edge_id);
         self.next_edge_id += 1;

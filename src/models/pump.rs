@@ -15,18 +15,22 @@ use std::marker::PhantomData;
 /// Generic over scalar type `S` to support both f64 and Dual64 for autodiff.
 pub struct PumpHeadVars<S: Scalar> {
     pub h: S,
-    pub dp_rho_g: S,
+    pub dp: S,
+    pub rho: S,
+    pub g: S,
 }
 
 impl<S: Scalar> EquationVarsGeneric<S> for PumpHeadVars<S> {
     fn base_names() -> &'static [&'static str] {
-        &["H", "dP_rho_g"]
+        &["H", "dP", "rho", "g"]
     }
 
     fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
         Some(Self {
             h: *vars.get(&format!("{}_H", prefix))?,
-            dp_rho_g: *vars.get(&format!("{}_dP_rho_g", prefix))?,
+            dp: *vars.get(&format!("{}_dP", prefix))?,
+            rho: *vars.get(&format!("{}_rho", prefix))?,
+            g: *vars.get(&format!("{}_g", prefix))?,
         })
     }
 }
@@ -34,7 +38,7 @@ impl<S: Scalar> EquationVarsGeneric<S> for PumpHeadVars<S> {
 // Backwards compatibility: EquationVars for f64
 impl EquationVars for PumpHeadVars<f64> {
     fn base_names() -> &'static [&'static str] {
-        &["H", "dP_rho_g"]
+        &["H", "dP", "rho", "g"]
     }
 
     fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
@@ -47,18 +51,26 @@ impl EquationVars for PumpHeadVars<f64> {
 /// Generic over scalar type `S` to support both f64 and Dual64 for autodiff.
 pub struct PumpPowerVars<S: Scalar> {
     pub w: S,
-    pub rho_g_h_q_eta: S,
+    pub rho: S,
+    pub g: S,
+    pub h: S,
+    pub q: S,
+    pub eta: S,
 }
 
 impl<S: Scalar> EquationVarsGeneric<S> for PumpPowerVars<S> {
     fn base_names() -> &'static [&'static str] {
-        &["W", "rho_g_H_Q_eta"]
+        &["W", "rho", "g", "H", "Q", "eta"]
     }
 
     fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
         Some(Self {
             w: *vars.get(&format!("{}_W", prefix))?,
-            rho_g_h_q_eta: *vars.get(&format!("{}_rho_g_H_Q_eta", prefix))?,
+            rho: *vars.get(&format!("{}_rho", prefix))?,
+            g: *vars.get(&format!("{}_g", prefix))?,
+            h: *vars.get(&format!("{}_H", prefix))?,
+            q: *vars.get(&format!("{}_Q", prefix))?,
+            eta: *vars.get(&format!("{}_eta", prefix))?,
         })
     }
 }
@@ -66,7 +78,7 @@ impl<S: Scalar> EquationVarsGeneric<S> for PumpPowerVars<S> {
 // Backwards compatibility: EquationVars for f64
 impl EquationVars for PumpPowerVars<f64> {
     fn base_names() -> &'static [&'static str] {
-        &["W", "rho_g_H_Q_eta"]
+        &["W", "rho", "g", "H", "Q", "eta"]
     }
 
     fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
@@ -268,7 +280,7 @@ impl<C, P: PortState> UnitOp for Pump<C, P> {
         let head_eq = ResidualFunction::from_typed(
             &format!("{}_head", unit_name),
             unit_name,
-            |v: PumpHeadVars<f64>| v.h - v.dp_rho_g,
+            |v: PumpHeadVars<f64>| v.h - v.dp / (v.rho * v.g),
         );
         system.add_algebraic(head_eq);
 
@@ -276,7 +288,7 @@ impl<C, P: PortState> UnitOp for Pump<C, P> {
         let power_eq = ResidualFunction::from_typed(
             &format!("{}_power", unit_name),
             unit_name,
-            |v: PumpPowerVars<f64>| v.w - v.rho_g_h_q_eta,
+            |v: PumpPowerVars<f64>| v.w - v.rho * v.g * v.h * v.q / v.eta,
         );
         system.add_algebraic(power_eq);
     }
@@ -289,8 +301,8 @@ impl<C, P: PortState> UnitOp for Pump<C, P> {
         let head_eq = ResidualFunction::from_typed_generic_with_dual(
             &format!("{}_head", unit_name),
             unit_name,
-            |v: PumpHeadVars<f64>| v.h - v.dp_rho_g,
-            |v: PumpHeadVars<Dual64>| v.h - v.dp_rho_g,
+            |v: PumpHeadVars<f64>| v.h - v.dp / (v.rho * v.g),
+            |v: PumpHeadVars<Dual64>| v.h - v.dp / (v.rho * v.g),
         );
         system.add_algebraic(head_eq);
 
@@ -298,8 +310,8 @@ impl<C, P: PortState> UnitOp for Pump<C, P> {
         let power_eq = ResidualFunction::from_typed_generic_with_dual(
             &format!("{}_power", unit_name),
             unit_name,
-            |v: PumpPowerVars<f64>| v.w - v.rho_g_h_q_eta,
-            |v: PumpPowerVars<Dual64>| v.w - v.rho_g_h_q_eta,
+            |v: PumpPowerVars<f64>| v.w - v.rho * v.g * v.h * v.q / v.eta,
+            |v: PumpPowerVars<Dual64>| v.w - v.rho * v.g * v.h * v.q / v.eta,
         );
         system.add_algebraic(power_eq);
     }

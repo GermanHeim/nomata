@@ -27,20 +27,24 @@ use crate::{EquationVarsGeneric, Scalar};
 
 /// Variables for steady-state segment mass balance: 0 = -v*dC/dz + D*d^2C/dz^2 - r
 pub struct PfrSteadyMassVars<S: Scalar> {
-    pub v_dc_dz: S,
-    pub d_d2c_dz2: S,
+    pub v: S,
+    pub dc_dz: S,
+    pub d: S,
+    pub d2c_dz2: S,
     pub r: S,
 }
 
 impl<S: Scalar> EquationVarsGeneric<S> for PfrSteadyMassVars<S> {
     fn base_names() -> &'static [&'static str] {
-        &["v_dc_dz", "d_d2c_dz2", "r"]
+        &["v", "dc_dz", "d", "d2c_dz2", "r"]
     }
 
     fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
         Some(Self {
-            v_dc_dz: *vars.get(&format!("{}_v_dc_dz", prefix))?,
-            d_d2c_dz2: *vars.get(&format!("{}_d_d2c_dz2", prefix))?,
+            v: *vars.get(&format!("{}_v", prefix))?,
+            dc_dz: *vars.get(&format!("{}_dc_dz", prefix))?,
+            d: *vars.get(&format!("{}_d", prefix))?,
+            d2c_dz2: *vars.get(&format!("{}_d2c_dz2", prefix))?,
             r: *vars.get(&format!("{}_r", prefix))?,
         })
     }
@@ -58,21 +62,31 @@ impl EquationVars for PfrSteadyMassVars<f64> {
 
 /// Variables for steady-state segment energy balance: 0 = -v*dT/dz + alpha*d^2T/dz^2 + r*deltaH/(rho*Cp)
 pub struct PfrSteadyEnergyVars<S: Scalar> {
-    pub v_dt_dz: S,
-    pub alpha_d2t_dz2: S,
-    pub r_deltah_rhocp: S,
+    pub v: S,
+    pub dt_dz: S,
+    pub alpha: S,
+    pub d2t_dz2: S,
+    pub r: S,
+    pub deltah: S,
+    pub rho: S,
+    pub cp: S,
 }
 
 impl<S: Scalar> EquationVarsGeneric<S> for PfrSteadyEnergyVars<S> {
     fn base_names() -> &'static [&'static str] {
-        &["v_dt_dz", "alpha_d2t_dz2", "r_deltah_rhocp"]
+        &["v", "dt_dz", "alpha", "d2t_dz2", "r", "deltah", "rho", "cp"]
     }
 
     fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
         Some(Self {
-            v_dt_dz: *vars.get(&format!("{}_v_dt_dz", prefix))?,
-            alpha_d2t_dz2: *vars.get(&format!("{}_alpha_d2t_dz2", prefix))?,
-            r_deltah_rhocp: *vars.get(&format!("{}_r_deltah_rhocp", prefix))?,
+            v: *vars.get(&format!("{}_v", prefix))?,
+            dt_dz: *vars.get(&format!("{}_dt_dz", prefix))?,
+            alpha: *vars.get(&format!("{}_alpha", prefix))?,
+            d2t_dz2: *vars.get(&format!("{}_d2t_dz2", prefix))?,
+            r: *vars.get(&format!("{}_r", prefix))?,
+            deltah: *vars.get(&format!("{}_deltah", prefix))?,
+            rho: *vars.get(&format!("{}_rho", prefix))?,
+            cp: *vars.get(&format!("{}_cp", prefix))?,
         })
     }
 }
@@ -90,21 +104,25 @@ impl EquationVars for PfrSteadyEnergyVars<f64> {
 /// Variables for dynamic segment mass balance: dC/dt = -v*dC/dz + D*d^2C/dz^2 - r
 pub struct PfrDynMassVars<S: Scalar> {
     pub dc_dt: S,
-    pub v_dc_dz: S,
-    pub d_d2c_dz2: S,
+    pub v: S,
+    pub dc_dz: S,
+    pub d: S,
+    pub d2c_dz2: S,
     pub r: S,
 }
 
 impl<S: Scalar> EquationVarsGeneric<S> for PfrDynMassVars<S> {
     fn base_names() -> &'static [&'static str] {
-        &["dc_dt", "v_dc_dz", "d_d2c_dz2", "r"]
+        &["dc_dt", "v", "dc_dz", "d", "d2c_dz2", "r"]
     }
 
     fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
         Some(Self {
             dc_dt: *vars.get(&format!("{}_dc_dt", prefix))?,
-            v_dc_dz: *vars.get(&format!("{}_v_dc_dz", prefix))?,
-            d_d2c_dz2: *vars.get(&format!("{}_d_d2c_dz2", prefix))?,
+            v: *vars.get(&format!("{}_v", prefix))?,
+            dc_dz: *vars.get(&format!("{}_dc_dz", prefix))?,
+            d: *vars.get(&format!("{}_d", prefix))?,
+            d2c_dz2: *vars.get(&format!("{}_d2c_dz2", prefix))?,
             r: *vars.get(&format!("{}_r", prefix))?,
         })
     }
@@ -123,22 +141,32 @@ impl EquationVars for PfrDynMassVars<f64> {
 /// Variables for dynamic segment energy balance: dT/dt = -v*dT/dz + alpha*d^2T/dz^2 + r*deltaH/(rho*Cp)
 pub struct PfrDynEnergyVars<S: Scalar> {
     pub dt_dt: S,
-    pub v_dt_dz: S,
-    pub alpha_d2t_dz2: S,
-    pub r_deltah_rhocp: S,
+    pub v: S,
+    pub dt_dz: S,
+    pub alpha: S,
+    pub d2t_dz2: S,
+    pub r: S,
+    pub deltah: S,
+    pub rho: S,
+    pub cp: S,
 }
 
 impl<S: Scalar> EquationVarsGeneric<S> for PfrDynEnergyVars<S> {
     fn base_names() -> &'static [&'static str] {
-        &["dt_dt", "v_dt_dz", "alpha_d2t_dz2", "r_deltah_rhocp"]
+        &["dt_dt", "v", "dt_dz", "alpha", "d2t_dz2", "r", "deltah", "rho", "cp"]
     }
 
     fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
         Some(Self {
             dt_dt: *vars.get(&format!("{}_dt_dt", prefix))?,
-            v_dt_dz: *vars.get(&format!("{}_v_dt_dz", prefix))?,
-            alpha_d2t_dz2: *vars.get(&format!("{}_alpha_d2t_dz2", prefix))?,
-            r_deltah_rhocp: *vars.get(&format!("{}_r_deltah_rhocp", prefix))?,
+            v: *vars.get(&format!("{}_v", prefix))?,
+            dt_dz: *vars.get(&format!("{}_dt_dz", prefix))?,
+            alpha: *vars.get(&format!("{}_alpha", prefix))?,
+            d2t_dz2: *vars.get(&format!("{}_d2t_dz2", prefix))?,
+            r: *vars.get(&format!("{}_r", prefix))?,
+            deltah: *vars.get(&format!("{}_deltah", prefix))?,
+            rho: *vars.get(&format!("{}_rho", prefix))?,
+            cp: *vars.get(&format!("{}_cp", prefix))?,
         })
     }
 }
@@ -441,7 +469,7 @@ impl<K, G, Thermo, P: PortState> UnitOp for PFR<K, G, Thermo, P> {
                 let mass_balance = ResidualFunction::from_typed(
                     &format!("{}_segment_{}_mass", unit_name, i),
                     &prefix,
-                    |v: PfrSteadyMassVars<f64>| v.v_dc_dz - v.d_d2c_dz2 + v.r,
+                    |v: PfrSteadyMassVars<f64>| v.v * v.dc_dz - v.d * v.d2c_dz2 + v.r,
                 );
                 system.add_algebraic(mass_balance);
 
@@ -450,7 +478,9 @@ impl<K, G, Thermo, P: PortState> UnitOp for PFR<K, G, Thermo, P> {
                 let energy_balance = ResidualFunction::from_typed(
                     &format!("{}_segment_{}_energy", unit_name, i),
                     &prefix,
-                    |v: PfrSteadyEnergyVars<f64>| v.v_dt_dz - v.alpha_d2t_dz2 - v.r_deltah_rhocp,
+                    |v: PfrSteadyEnergyVars<f64>| {
+                        v.v * v.dt_dz - v.alpha * v.d2t_dz2 - v.r * v.deltah / (v.rho * v.cp)
+                    },
                 );
                 system.add_algebraic(energy_balance);
             } else {
@@ -459,7 +489,7 @@ impl<K, G, Thermo, P: PortState> UnitOp for PFR<K, G, Thermo, P> {
                 let mass_balance = ResidualFunction::from_typed(
                     &format!("{}_segment_{}_mass", unit_name, i),
                     &prefix,
-                    |v: PfrDynMassVars<f64>| v.dc_dt + v.v_dc_dz - v.d_d2c_dz2 + v.r,
+                    |v: PfrDynMassVars<f64>| v.dc_dt + v.v * v.dc_dz - v.d * v.d2c_dz2 + v.r,
                 );
                 system.add_differential(mass_balance);
 
@@ -469,7 +499,9 @@ impl<K, G, Thermo, P: PortState> UnitOp for PFR<K, G, Thermo, P> {
                     &format!("{}_segment_{}_energy", unit_name, i),
                     &prefix,
                     |v: PfrDynEnergyVars<f64>| {
-                        v.dt_dt + v.v_dt_dz - v.alpha_d2t_dz2 - v.r_deltah_rhocp
+                        v.dt_dt + v.v * v.dt_dz
+                            - v.alpha * v.d2t_dz2
+                            - v.r * v.deltah / (v.rho * v.cp)
                     },
                 );
                 system.add_differential(energy_balance);
@@ -502,8 +534,8 @@ impl<K, G, Thermo, P: PortState> UnitOp for PFR<K, G, Thermo, P> {
                 let mass_balance = ResidualFunction::from_typed_generic_with_dual(
                     &format!("{}_segment_{}_mass", unit_name, i),
                     &prefix,
-                    |v: PfrSteadyMassVars<f64>| v.v_dc_dz - v.d_d2c_dz2 + v.r,
-                    |v: PfrSteadyMassVars<Dual64>| v.v_dc_dz - v.d_d2c_dz2 + v.r,
+                    |v: PfrSteadyMassVars<f64>| v.v * v.dc_dz - v.d * v.d2c_dz2 + v.r,
+                    |v: PfrSteadyMassVars<Dual64>| v.v * v.dc_dz - v.d * v.d2c_dz2 + v.r,
                 );
                 system.add_algebraic(mass_balance);
 
@@ -512,8 +544,12 @@ impl<K, G, Thermo, P: PortState> UnitOp for PFR<K, G, Thermo, P> {
                 let energy_balance = ResidualFunction::from_typed_generic_with_dual(
                     &format!("{}_segment_{}_energy", unit_name, i),
                     &prefix,
-                    |v: PfrSteadyEnergyVars<f64>| v.v_dt_dz - v.alpha_d2t_dz2 - v.r_deltah_rhocp,
-                    |v: PfrSteadyEnergyVars<Dual64>| v.v_dt_dz - v.alpha_d2t_dz2 - v.r_deltah_rhocp,
+                    |v: PfrSteadyEnergyVars<f64>| {
+                        v.v * v.dt_dz - v.alpha * v.d2t_dz2 - v.r * v.deltah / (v.rho * v.cp)
+                    },
+                    |v: PfrSteadyEnergyVars<Dual64>| {
+                        v.v * v.dt_dz - v.alpha * v.d2t_dz2 - v.r * v.deltah / (v.rho * v.cp)
+                    },
                 );
                 system.add_algebraic(energy_balance);
             } else {
@@ -522,8 +558,8 @@ impl<K, G, Thermo, P: PortState> UnitOp for PFR<K, G, Thermo, P> {
                 let mass_balance = ResidualFunction::from_typed_generic_with_dual(
                     &format!("{}_segment_{}_mass", unit_name, i),
                     &prefix,
-                    |v: PfrDynMassVars<f64>| v.dc_dt + v.v_dc_dz - v.d_d2c_dz2 + v.r,
-                    |v: PfrDynMassVars<Dual64>| v.dc_dt + v.v_dc_dz - v.d_d2c_dz2 + v.r,
+                    |v: PfrDynMassVars<f64>| v.dc_dt + v.v * v.dc_dz - v.d * v.d2c_dz2 + v.r,
+                    |v: PfrDynMassVars<Dual64>| v.dc_dt + v.v * v.dc_dz - v.d * v.d2c_dz2 + v.r,
                 );
                 system.add_differential(mass_balance);
 
@@ -533,10 +569,14 @@ impl<K, G, Thermo, P: PortState> UnitOp for PFR<K, G, Thermo, P> {
                     &format!("{}_segment_{}_energy", unit_name, i),
                     &prefix,
                     |v: PfrDynEnergyVars<f64>| {
-                        v.dt_dt + v.v_dt_dz - v.alpha_d2t_dz2 - v.r_deltah_rhocp
+                        v.dt_dt + v.v * v.dt_dz
+                            - v.alpha * v.d2t_dz2
+                            - v.r * v.deltah / (v.rho * v.cp)
                     },
                     |v: PfrDynEnergyVars<Dual64>| {
-                        v.dt_dt + v.v_dt_dz - v.alpha_d2t_dz2 - v.r_deltah_rhocp
+                        v.dt_dt + v.v * v.dt_dz
+                            - v.alpha * v.d2t_dz2
+                            - v.r * v.deltah / (v.rho * v.cp)
                     },
                 );
                 system.add_differential(energy_balance);

@@ -1,6 +1,7 @@
 #![cfg_attr(not(doctest), doc = include_str!("../README.md"))]
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
@@ -759,6 +760,35 @@ impl<S: StreamType> Stream<S, InitializedConditions> {
 
         Ok(())
     }
+}
+
+/// Trait for unit operations that can be automatically initialized from stream data.
+///
+/// When a stream is connected to a unit, this trait allows automatic property computation
+/// from the stream's thermodynamic state (P, T, composition).
+///
+/// # Examples
+///
+/// ```
+/// use nomata::{Stream, MolarFlow, FromStream, StreamType};
+///
+/// // Implement for your unit operation
+/// struct MyUnit {
+///     temp: f64,
+/// }
+///
+/// impl FromStream for MyUnit {
+///     fn from_stream<S: StreamType, C>(stream: &Stream<S, C>) -> Self {
+///         MyUnit { temp: stream.temperature }
+///     }
+/// }
+/// ```
+pub trait FromStream: Sized {
+    /// Create an initialized unit from stream data.
+    ///
+    /// This method should extract relevant properties (flow, temperature, etc.)
+    /// from the stream and return a fully initialized unit.
+    fn from_stream<S: StreamType, C>(stream: &Stream<S, C>) -> Self;
 }
 
 /// Graph Layer: Unit Operations
@@ -2367,6 +2397,8 @@ pub struct Flowsheet<T: TimeDomain> {
     units: Vec<UnitInfo>,
     /// Adjacency list: connections between units
     connections: Vec<Connection>,
+    /// Stream data at ports (keyed by PortId)
+    stream_data: HashMap<PortId, StreamData>,
     /// Next available unit ID
     next_unit_id: usize,
     /// Next available edge ID
@@ -2377,12 +2409,25 @@ pub struct Flowsheet<T: TimeDomain> {
     pending_harvests: Vec<Box<dyn Fn(&mut EquationSystem<T>)>>,
 }
 
+/// Stream data stored at a port.
+///
+/// This stores the physical properties needed to initialize unit operations.
+#[derive(Debug, Clone)]
+pub struct StreamData {
+    pub flow: f64,
+    pub temperature: f64,
+    pub pressure: f64,
+    pub composition: Vec<f64>,
+    pub components: Vec<String>,
+}
+
 impl<T: TimeDomain> Flowsheet<T> {
     /// Creates a new empty flowsheet.
     pub fn new() -> Self {
         Flowsheet {
             units: Vec::new(),
             connections: Vec::new(),
+            stream_data: HashMap::new(),
             next_unit_id: 0,
             next_edge_id: 0,
             equation_system: EquationSystem::new(),
@@ -2525,6 +2570,31 @@ impl<T: TimeDomain> Flowsheet<T> {
         }
 
         Ok(())
+    }
+
+    /// Stores stream data at a specific port.
+    ///
+    /// This allows units to query their inlet stream properties.
+    pub fn set_stream_at_port<S: StreamType, C>(
+        &mut self,
+        port: PortId,
+        stream: &Stream<S, C>,
+    ) {
+        let data = StreamData {
+            flow: stream.total_flow,
+            temperature: stream.temperature,
+            pressure: stream.pressure,
+            composition: stream.composition.clone(),
+            components: stream.components.clone(),
+        };
+        self.stream_data.insert(port, data);
+    }
+
+    /// Retrieves stream data at a specific port.
+    ///
+    /// Returns None if no stream data has been set at this port.
+    pub fn get_stream_at_port(&self, port: &PortId) -> Option<&StreamData> {
+        self.stream_data.get(port)
     }
 
     /// Detects cycles in the flowsheet using depth-first search.
@@ -2917,6 +2987,46 @@ where
     let edge_id = connection.id;
 
     (out_connected, in_connected, edge_id)
+}
+
+/// Connects a stream to a unit operation, automatically initializing the unit from stream data.
+///
+/// This function:
+/// 1. Stores the stream data in the flowsheet at the specified port
+/// 2. Automatically calls the unit's `initialize_from_stream` method if it implements `FromStream`
+///
+/// # Type Parameters
+///
+/// - `S`: Stream type (e.g., MolarFlow, MassFlow)
+/// - `C`: Stream condition state
+/// - `U`: Unit operation type that implements `FromStream`
+/// - `T`: Time domain
+///
+/// # Examples
+///
+/// ```ignore
+/// use nomata::{Stream, MolarFlow, Flowsheet, Dynamic, PortId, UnitId};
+///
+/// let stream = Stream::<MolarFlow, _>::pure(100.0, "Water".to_string(), 300.0, 101325.0);
+/// let mut flowsheet = Flowsheet::<Dynamic>::new();
+///
+/// let port_id = PortId { unit: UnitId(0), port_index: 0 };
+///
+/// // Automatically creates and initializes heater from stream properties
+/// let heater = Heater::from_stream(&stream);
+/// flowsheet.set_stream_at_port(port_id, &stream);
+/// ```
+pub fn connect_stream_to_unit<S: StreamType, C, U, T>(
+    stream: &Stream<S, C>,
+    flowsheet: &mut Flowsheet<T>,
+    port_id: PortId,
+) -> U
+where
+    U: FromStream,
+    T: TimeDomain,
+{
+    flowsheet.set_stream_at_port(port_id, stream);
+    U::from_stream(stream)
 }
 
 /// Graph Layer: Model Container

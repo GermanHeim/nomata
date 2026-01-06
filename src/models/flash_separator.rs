@@ -72,21 +72,27 @@ impl EquationVars for FlashMassBalanceVars<f64> {
 
 /// Variables for steady-state energy balance: 0 = F_in*H_in - V*H_v - L*H_l
 pub struct FlashEnergyBalanceVars<S: Scalar> {
-    pub f_in_h_in: S,
-    pub v_h_v: S,
-    pub l_h_l: S,
+    pub f_in: S,
+    pub h_in: S,
+    pub v: S,
+    pub h_v: S,
+    pub l: S,
+    pub h_l: S,
 }
 
 impl<S: Scalar> EquationVarsGeneric<S> for FlashEnergyBalanceVars<S> {
     fn base_names() -> &'static [&'static str] {
-        &["f_in_h_in", "v_h_v", "l_h_l"]
+        &["f_in", "h_in", "v", "h_v", "l", "h_l"]
     }
 
     fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
         Some(Self {
-            f_in_h_in: *vars.get(&format!("{}_f_in_h_in", prefix))?,
-            v_h_v: *vars.get(&format!("{}_v_h_v", prefix))?,
-            l_h_l: *vars.get(&format!("{}_l_h_l", prefix))?,
+            f_in: *vars.get(&format!("{}_f_in", prefix))?,
+            h_in: *vars.get(&format!("{}_h_in", prefix))?,
+            v: *vars.get(&format!("{}_v", prefix))?,
+            h_v: *vars.get(&format!("{}_h_v", prefix))?,
+            l: *vars.get(&format!("{}_l", prefix))?,
+            h_l: *vars.get(&format!("{}_h_l", prefix))?,
         })
     }
 }
@@ -137,22 +143,28 @@ impl EquationVars for FlashDynMassBalanceVars<f64> {
 /// Variables for dynamic energy balance: d(M*H)/dt = F_in*H_in - V*H_v - L*H_l
 pub struct FlashDynEnergyBalanceVars<S: Scalar> {
     pub d_mh_dt: S,
-    pub f_in_h_in: S,
-    pub v_h_v: S,
-    pub l_h_l: S,
+    pub f_in: S,
+    pub h_in: S,
+    pub v: S,
+    pub h_v: S,
+    pub l: S,
+    pub h_l: S,
 }
 
 impl<S: Scalar> EquationVarsGeneric<S> for FlashDynEnergyBalanceVars<S> {
     fn base_names() -> &'static [&'static str] {
-        &["d_mh_dt", "f_in_h_in", "v_h_v", "l_h_l"]
+        &["d_mh_dt", "f_in", "h_in", "v", "h_v", "l", "h_l"]
     }
 
     fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
         Some(Self {
             d_mh_dt: *vars.get(&format!("{}_d_mh_dt", prefix))?,
-            f_in_h_in: *vars.get(&format!("{}_f_in_h_in", prefix))?,
-            v_h_v: *vars.get(&format!("{}_v_h_v", prefix))?,
-            l_h_l: *vars.get(&format!("{}_l_h_l", prefix))?,
+            f_in: *vars.get(&format!("{}_f_in", prefix))?,
+            h_in: *vars.get(&format!("{}_h_in", prefix))?,
+            v: *vars.get(&format!("{}_v", prefix))?,
+            h_v: *vars.get(&format!("{}_h_v", prefix))?,
+            l: *vars.get(&format!("{}_l", prefix))?,
+            h_l: *vars.get(&format!("{}_h_l", prefix))?,
         })
     }
 }
@@ -170,18 +182,20 @@ impl EquationVars for FlashDynEnergyBalanceVars<f64> {
 /// Variables for VLE equation: y_i = K_i * x_i
 pub struct VleVars<S: Scalar> {
     pub y: S,
-    pub k_x: S,
+    pub k: S,
+    pub x: S,
 }
 
 impl<S: Scalar> EquationVarsGeneric<S> for VleVars<S> {
     fn base_names() -> &'static [&'static str] {
-        &["y", "k_x"]
+        &["y", "k", "x"]
     }
 
     fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
         Some(Self {
             y: *vars.get(&format!("{}_y", prefix))?,
-            k_x: *vars.get(&format!("{}_k_x", prefix))?,
+            k: *vars.get(&format!("{}_k", prefix))?,
+            x: *vars.get(&format!("{}_x", prefix))?,
         })
     }
 }
@@ -581,7 +595,7 @@ impl<E, S> UnitOp for FlashSeparator<E, S> {
             let energy_balance = ResidualFunction::from_typed(
                 &format!("{}_energy_balance", unit_name),
                 unit_name,
-                |v: FlashEnergyBalanceVars<f64>| v.f_in_h_in - v.v_h_v - v.l_h_l,
+                |v: FlashEnergyBalanceVars<f64>| v.f_in * v.h_in - v.v * v.h_v - v.l * v.h_l,
             );
             system.add_algebraic(energy_balance);
         } else {
@@ -620,7 +634,9 @@ impl<E, S> UnitOp for FlashSeparator<E, S> {
             let energy_balance = ResidualFunction::from_typed(
                 &format!("{}_energy_balance", unit_name),
                 unit_name,
-                |v: FlashDynEnergyBalanceVars<f64>| v.d_mh_dt - v.f_in_h_in + v.v_h_v + v.l_h_l,
+                |v: FlashDynEnergyBalanceVars<f64>| {
+                    v.d_mh_dt - v.f_in * v.h_in + v.v * v.h_v + v.l * v.h_l
+                },
             );
             system.add_differential(energy_balance);
         }
@@ -631,7 +647,7 @@ impl<E, S> UnitOp for FlashSeparator<E, S> {
             let vle = ResidualFunction::from_typed(
                 &format!("{}_vle_{}", unit_name, i),
                 &prefix,
-                |v: VleVars<f64>| v.y - v.k_x,
+                |v: VleVars<f64>| v.y - v.k * v.x,
             );
             system.add_algebraic(vle);
         }
@@ -721,8 +737,8 @@ impl<E, S> UnitOp for FlashSeparator<E, S> {
             let energy_balance = ResidualFunction::from_typed_generic_with_dual(
                 &format!("{}_energy_balance", unit_name),
                 unit_name,
-                |v: FlashEnergyBalanceVars<f64>| v.f_in_h_in - v.v_h_v - v.l_h_l,
-                |v: FlashEnergyBalanceVars<Dual64>| v.f_in_h_in - v.v_h_v - v.l_h_l,
+                |v: FlashEnergyBalanceVars<f64>| v.f_in * v.h_in - v.v * v.h_v - v.l * v.h_l,
+                |v: FlashEnergyBalanceVars<Dual64>| v.f_in * v.h_in - v.v * v.h_v - v.l * v.h_l,
             );
             system.add_algebraic(energy_balance);
         } else {
@@ -763,8 +779,12 @@ impl<E, S> UnitOp for FlashSeparator<E, S> {
             let energy_balance = ResidualFunction::from_typed_generic_with_dual(
                 &format!("{}_energy_balance", unit_name),
                 unit_name,
-                |v: FlashDynEnergyBalanceVars<f64>| v.d_mh_dt - v.f_in_h_in + v.v_h_v + v.l_h_l,
-                |v: FlashDynEnergyBalanceVars<Dual64>| v.d_mh_dt - v.f_in_h_in + v.v_h_v + v.l_h_l,
+                |v: FlashDynEnergyBalanceVars<f64>| {
+                    v.d_mh_dt - v.f_in * v.h_in + v.v * v.h_v + v.l * v.h_l
+                },
+                |v: FlashDynEnergyBalanceVars<Dual64>| {
+                    v.d_mh_dt - v.f_in * v.h_in + v.v * v.h_v + v.l * v.h_l
+                },
             );
             system.add_differential(energy_balance);
         }
@@ -775,8 +795,8 @@ impl<E, S> UnitOp for FlashSeparator<E, S> {
             let vle = ResidualFunction::from_typed_generic_with_dual(
                 &format!("{}_vle_{}", unit_name, i),
                 &prefix,
-                |v: VleVars<f64>| v.y - v.k_x,
-                |v: VleVars<Dual64>| v.y - v.k_x,
+                |v: VleVars<f64>| v.y - v.k * v.x,
+                |v: VleVars<Dual64>| v.y - v.k * v.x,
             );
             system.add_algebraic(vle);
         }

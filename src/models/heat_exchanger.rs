@@ -40,25 +40,29 @@ use crate::thermodynamics::{Fluid, fluids::Pure};
 /// Generic over scalar type `S` to support both f64 and Dual64 for autodiff.
 pub struct HotEnergyBalanceVars<S: Scalar> {
     pub q: S,
-    pub m_hot_cp_hot_dt_hot: S,
+    pub m_hot: S,
+    pub cp_hot: S,
+    pub dt_hot: S,
 }
 
 impl<S: Scalar> EquationVarsGeneric<S> for HotEnergyBalanceVars<S> {
     fn base_names() -> &'static [&'static str] {
-        &["Q", "m_hot_Cp_hot_dT_hot"]
+        &["Q", "m_hot", "Cp_hot", "dT_hot"]
     }
 
     fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
         Some(Self {
             q: *vars.get(&format!("{}_Q", prefix))?,
-            m_hot_cp_hot_dt_hot: *vars.get(&format!("{}_m_hot_Cp_hot_dT_hot", prefix))?,
+            m_hot: *vars.get(&format!("{}_m_hot", prefix))?,
+            cp_hot: *vars.get(&format!("{}_Cp_hot", prefix))?,
+            dt_hot: *vars.get(&format!("{}_dT_hot", prefix))?,
         })
     }
 }
 
 impl EquationVars for HotEnergyBalanceVars<f64> {
     fn base_names() -> &'static [&'static str] {
-        &["Q", "m_hot_Cp_hot_dT_hot"]
+        &["Q", "m_hot", "Cp_hot", "dT_hot"]
     }
 
     fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
@@ -71,25 +75,29 @@ impl EquationVars for HotEnergyBalanceVars<f64> {
 /// Generic over scalar type `S` to support both f64 and Dual64 for autodiff.
 pub struct ColdEnergyBalanceVars<S: Scalar> {
     pub q: S,
-    pub m_cold_cp_cold_dt_cold: S,
+    pub m_cold: S,
+    pub cp_cold: S,
+    pub dt_cold: S,
 }
 
 impl<S: Scalar> EquationVarsGeneric<S> for ColdEnergyBalanceVars<S> {
     fn base_names() -> &'static [&'static str] {
-        &["Q", "m_cold_Cp_cold_dT_cold"]
+        &["Q", "m_cold", "Cp_cold", "dT_cold"]
     }
 
     fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
         Some(Self {
             q: *vars.get(&format!("{}_Q", prefix))?,
-            m_cold_cp_cold_dt_cold: *vars.get(&format!("{}_m_cold_Cp_cold_dT_cold", prefix))?,
+            m_cold: *vars.get(&format!("{}_m_cold", prefix))?,
+            cp_cold: *vars.get(&format!("{}_Cp_cold", prefix))?,
+            dt_cold: *vars.get(&format!("{}_dT_cold", prefix))?,
         })
     }
 }
 
 impl EquationVars for ColdEnergyBalanceVars<f64> {
     fn base_names() -> &'static [&'static str] {
-        &["Q", "m_cold_Cp_cold_dT_cold"]
+        &["Q", "m_cold", "Cp_cold", "dT_cold"]
     }
 
     fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
@@ -102,25 +110,29 @@ impl EquationVars for ColdEnergyBalanceVars<f64> {
 /// Generic over scalar type `S` to support both f64 and Dual64 for autodiff.
 pub struct HeatTransferVars<S: Scalar> {
     pub q: S,
-    pub u_a_lmtd: S,
+    pub u: S,
+    pub a: S,
+    pub lmtd: S,
 }
 
 impl<S: Scalar> EquationVarsGeneric<S> for HeatTransferVars<S> {
     fn base_names() -> &'static [&'static str] {
-        &["Q", "U_A_LMTD"]
+        &["Q", "U", "A", "LMTD"]
     }
 
     fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
         Some(Self {
             q: *vars.get(&format!("{}_Q", prefix))?,
-            u_a_lmtd: *vars.get(&format!("{}_U_A_LMTD", prefix))?,
+            u: *vars.get(&format!("{}_U", prefix))?,
+            a: *vars.get(&format!("{}_A", prefix))?,
+            lmtd: *vars.get(&format!("{}_LMTD", prefix))?,
         })
     }
 }
 
 impl EquationVars for HeatTransferVars<f64> {
     fn base_names() -> &'static [&'static str] {
-        &["Q", "U_A_LMTD"]
+        &["Q", "U", "A", "LMTD"]
     }
 
     fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
@@ -480,7 +492,7 @@ impl<H, C> UnitOp for HeatExchanger<H, C> {
         let hot_balance = ResidualFunction::from_typed(
             &format!("{}_hot_energy", unit_name),
             unit_name,
-            |v: HotEnergyBalanceVars<f64>| v.q - v.m_hot_cp_hot_dt_hot,
+            |v: HotEnergyBalanceVars<f64>| v.q - v.m_hot * v.cp_hot * v.dt_hot,
         );
         system.add_algebraic(hot_balance);
 
@@ -488,7 +500,7 @@ impl<H, C> UnitOp for HeatExchanger<H, C> {
         let cold_balance = ResidualFunction::from_typed(
             &format!("{}_cold_energy", unit_name),
             unit_name,
-            |v: ColdEnergyBalanceVars<f64>| v.q - v.m_cold_cp_cold_dt_cold,
+            |v: ColdEnergyBalanceVars<f64>| v.q - v.m_cold * v.cp_cold * v.dt_cold,
         );
         system.add_algebraic(cold_balance);
 
@@ -496,7 +508,7 @@ impl<H, C> UnitOp for HeatExchanger<H, C> {
         let heat_transfer = ResidualFunction::from_typed(
             &format!("{}_heat_transfer", unit_name),
             unit_name,
-            |v: HeatTransferVars<f64>| v.q - v.u_a_lmtd,
+            |v: HeatTransferVars<f64>| v.q - v.u * v.a * v.lmtd,
         );
         system.add_algebraic(heat_transfer);
     }
@@ -509,8 +521,8 @@ impl<H, C> UnitOp for HeatExchanger<H, C> {
         let hot_balance = ResidualFunction::from_typed_generic_with_dual(
             &format!("{}_hot_energy", unit_name),
             unit_name,
-            |v: HotEnergyBalanceVars<f64>| v.q - v.m_hot_cp_hot_dt_hot,
-            |v: HotEnergyBalanceVars<Dual64>| v.q - v.m_hot_cp_hot_dt_hot,
+            |v: HotEnergyBalanceVars<f64>| v.q - v.m_hot * v.cp_hot * v.dt_hot,
+            |v: HotEnergyBalanceVars<Dual64>| v.q - v.m_hot * v.cp_hot * v.dt_hot,
         );
         system.add_algebraic(hot_balance);
 
@@ -518,8 +530,8 @@ impl<H, C> UnitOp for HeatExchanger<H, C> {
         let cold_balance = ResidualFunction::from_typed_generic_with_dual(
             &format!("{}_cold_energy", unit_name),
             unit_name,
-            |v: ColdEnergyBalanceVars<f64>| v.q - v.m_cold_cp_cold_dt_cold,
-            |v: ColdEnergyBalanceVars<Dual64>| v.q - v.m_cold_cp_cold_dt_cold,
+            |v: ColdEnergyBalanceVars<f64>| v.q - v.m_cold * v.cp_cold * v.dt_cold,
+            |v: ColdEnergyBalanceVars<Dual64>| v.q - v.m_cold * v.cp_cold * v.dt_cold,
         );
         system.add_algebraic(cold_balance);
 
@@ -527,8 +539,8 @@ impl<H, C> UnitOp for HeatExchanger<H, C> {
         let heat_transfer = ResidualFunction::from_typed_generic_with_dual(
             &format!("{}_heat_transfer", unit_name),
             unit_name,
-            |v: HeatTransferVars<f64>| v.q - v.u_a_lmtd,
-            |v: HeatTransferVars<Dual64>| v.q - v.u_a_lmtd,
+            |v: HeatTransferVars<f64>| v.q - v.u * v.a * v.lmtd,
+            |v: HeatTransferVars<Dual64>| v.q - v.u * v.a * v.lmtd,
         );
         system.add_algebraic(heat_transfer);
     }

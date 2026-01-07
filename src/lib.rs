@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
+use thiserror::Error;
+
 // Core modules
 pub mod models;
 
@@ -459,18 +461,22 @@ impl CanDifferentiate for Var<Differential> {
 pub trait StreamType {}
 
 /// Mass flow rate stream (kg/s or similar units).
+#[derive(Debug, Clone, Copy)]
 pub struct MassFlow;
 impl StreamType for MassFlow {}
 
 /// Molar flow rate stream (mol/s or similar units).
+#[derive(Debug, Clone, Copy)]
 pub struct MolarFlow;
 impl StreamType for MolarFlow {}
 
 /// Temperature stream (K or similar units).
+#[derive(Debug, Clone, Copy)]
 pub struct Temperature;
 impl StreamType for Temperature {}
 
 /// Pressure stream (Pa or similar units).
+#[derive(Debug, Clone, Copy)]
 pub struct Pressure;
 impl StreamType for Pressure {}
 
@@ -511,6 +517,83 @@ impl StreamType for Pressure {}
 /// assert_eq!(stream.component_flow(0), 60.0);  // Water: 60 mol/s
 /// assert_eq!(stream.component_flow(1), 40.0);  // Ethanol: 40 mol/s
 /// ```
+
+/// Error type for stream-related operations.
+#[derive(Error, Debug)]
+pub enum StreamError {
+    #[error(
+        "Missing composition data for {model} outlet stream. Use {suggestion} to provide inlet composition."
+    )]
+    MissingComposition { model: String, suggestion: String },
+    #[error("{model} requires composition calculation from {calculation_type}.")]
+    RequiresCalculation { model: String, calculation_type: String },
+    #[error("Stream not available: {reason}. {suggestion}")]
+    NotAvailable { reason: String, suggestion: String },
+}
+
+/// Reference to an outlet stream that can be queried after solving.
+///
+/// This allows building a flowsheet declaratively without computing streams immediately.
+/// After solving the flowsheet, call `get()` to retrieve the computed stream.
+///
+/// # Examples
+///
+/// ```
+/// use nomata::OutletRef;
+///
+/// // Create reference (doesn't compute stream yet)
+/// let outlet_ref = OutletRef::new("Heater-101", "outlet");
+///
+/// // Build flowsheet...
+/// // Solve flowsheet...
+///
+/// // Then access stream
+/// // let stream = outlet_ref.get()?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct OutletRef {
+    /// Unit name or ID
+    unit_name: String,
+    /// Port name
+    port_name: String,
+    /// Cached stream data (populated after solving)
+    stream: std::cell::RefCell<Option<Stream<MolarFlow>>>,
+}
+
+impl OutletRef {
+    /// Creates a new outlet reference.
+    pub fn new(unit_name: &str, port_name: &str) -> Self {
+        OutletRef {
+            unit_name: unit_name.to_string(),
+            port_name: port_name.to_string(),
+            stream: std::cell::RefCell::new(None),
+        }
+    }
+
+    /// Gets the stream data (after solving).
+    pub fn get(&self) -> Result<Stream<MolarFlow>, StreamError> {
+        self.stream.borrow().as_ref().cloned().ok_or_else(|| StreamError::NotAvailable {
+            reason: format!("Stream from {}.{} not computed", self.unit_name, self.port_name),
+            suggestion: "Solve the flowsheet first".to_string(),
+        })
+    }
+
+    /// Sets the stream data (internal, called by solver).
+    pub fn set(&self, stream: Stream<MolarFlow>) {
+        *self.stream.borrow_mut() = Some(stream);
+    }
+
+    /// Checks if stream data is available.
+    pub fn is_available(&self) -> bool {
+        self.stream.borrow().is_some()
+    }
+
+    /// Clears the cached stream (e.g., before re-solving).
+    pub fn clear(&self) {
+        *self.stream.borrow_mut() = None;
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Stream<S: StreamType, C = InitializedConditions> {
     /// Total flow rate [kg/s or mol/s depending on S]
@@ -530,9 +613,11 @@ pub struct Stream<S: StreamType, C = InitializedConditions> {
 }
 
 /// Phantom type marker for uninitialized stream conditions.
+#[derive(Debug, Clone, Copy)]
 pub struct UninitializedConditions;
 
 /// Phantom type marker for initialized stream conditions.
+#[derive(Debug, Clone, Copy)]
 pub struct InitializedConditions;
 
 impl<S: StreamType> Stream<S, UninitializedConditions> {
@@ -2575,11 +2660,7 @@ impl<T: TimeDomain> Flowsheet<T> {
     /// Stores stream data at a specific port.
     ///
     /// This allows units to query their inlet stream properties.
-    pub fn set_stream_at_port<S: StreamType, C>(
-        &mut self,
-        port: PortId,
-        stream: &Stream<S, C>,
-    ) {
+    pub fn set_stream_at_port<S: StreamType, C>(&mut self, port: PortId, stream: &Stream<S, C>) {
         let data = StreamData {
             flow: stream.total_flow,
             temperature: stream.temperature,

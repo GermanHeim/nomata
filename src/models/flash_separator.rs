@@ -240,6 +240,11 @@ pub struct FlashSeparator<E = Uninitialized, S = Uninitialized> {
     pub liquid_composition: Vec<Var<Algebraic>>,
     pub vapor_composition: Vec<Var<Algebraic>>,
 
+    // Flow rates
+    pub inlet_flow: Var<Algebraic>,
+    pub vapor_flow: Var<Algebraic>,
+    pub liquid_flow: Var<Algebraic>,
+
     // Ports
     pub inlet: Port<Stream<MolarFlow>, Input, Disconnected>,
     pub vapor_outlet: Port<Stream<MolarFlow>, Output, Disconnected>,
@@ -273,6 +278,10 @@ impl FlashSeparator<Uninitialized, Uninitialized> {
             feed_composition: vec![1.0 / n_components as f64; n_components],
             liquid_composition: (0..n_components).map(|_| Var::new(0.0)).collect(),
             vapor_composition: (0..n_components).map(|_| Var::new(0.0)).collect(),
+
+            inlet_flow: Var::new(0.0),
+            vapor_flow: Var::new(0.0),
+            liquid_flow: Var::new(0.0),
 
             inlet: Port::new(),
             vapor_outlet: Port::new(),
@@ -312,6 +321,10 @@ impl<S> FlashSeparator<Uninitialized, S> {
             feed_composition: self.feed_composition,
             liquid_composition: self.liquid_composition,
             vapor_composition: self.vapor_composition,
+
+            inlet_flow: self.inlet_flow,
+            vapor_flow: self.vapor_flow,
+            liquid_flow: self.liquid_flow,
 
             inlet: self.inlet,
             vapor_outlet: self.vapor_outlet,
@@ -366,6 +379,10 @@ impl<S> FlashSeparator<Uninitialized, S> {
             feed_composition: self.feed_composition,
             liquid_composition: self.liquid_composition,
             vapor_composition: self.vapor_composition,
+
+            inlet_flow: self.inlet_flow,
+            vapor_flow: self.vapor_flow,
+            liquid_flow: self.liquid_flow,
 
             inlet: self.inlet,
             vapor_outlet: self.vapor_outlet,
@@ -437,6 +454,10 @@ impl<E> FlashSeparator<E, Uninitialized> {
             liquid_composition: self.liquid_composition,
             vapor_composition: self.vapor_composition,
 
+            inlet_flow: self.inlet_flow,
+            vapor_flow: self.vapor_flow,
+            liquid_flow: self.liquid_flow,
+
             inlet: self.inlet,
             vapor_outlet: self.vapor_outlet,
             liquid_outlet: self.liquid_outlet,
@@ -456,6 +477,11 @@ impl<E, S> FlashSeparator<E, S> {
     pub fn set_feed_composition(&mut self, composition: Vec<f64>) {
         assert_eq!(composition.len(), self.n_components);
         self.feed_composition = composition;
+    }
+
+    /// Sets the inlet flow rate from a stream.
+    pub fn set_inlet_flow(&mut self, flow: f64) {
+        self.inlet_flow = Var::new(flow);
     }
 
     /// Creates mass balance equation.
@@ -529,6 +555,74 @@ impl FlashSeparator<Initialized, Initialized> {
     /// Gets all K-values.
     pub fn k_values(&self) -> Vec<f64> {
         self.k_values.as_ref().unwrap().iter().map(|k| k.get()).collect()
+    }
+
+    /// Creates the vapor outlet stream from flash.
+    ///
+    /// Returns a stream with vapor composition and conditions.
+    /// Flow rate is computed as inlet_flow * vapor_fraction.
+    pub fn vapor_outlet_stream(&self) -> Stream<MolarFlow> {
+        let flow = self.inlet_flow.get() * self.vapor_fraction.get();
+        let temp = self.temperature.get();
+        let pressure = self.pressure.get();
+
+        // Get vapor composition
+        let composition: Vec<f64> = self.vapor_composition.iter().map(|v| v.get()).collect();
+        
+        #[cfg(feature = "thermodynamics")]
+        {
+            if !self.component_names.is_empty() {
+                if let Ok(stream) = Stream::with_composition(flow, self.component_names.clone(), composition.clone()) {
+                    return stream.at_conditions(temp, pressure);
+                }
+            }
+        }
+        
+        // Fallback: create generic multicomponent stream
+        let component_names: Vec<String> = (0..self.n_components)
+            .map(|i| format!("Component_{}", i))
+            .collect();
+        
+        Stream::with_composition(flow, component_names, composition)
+            .unwrap_or_else(|_| {
+                // If composition is invalid, create a pure stream
+                Stream::new(flow, vec!["Vapor".to_string()])
+            })
+            .at_conditions(temp, pressure)
+    }
+
+    /// Creates the liquid outlet stream from flash.
+    ///
+    /// Returns a stream with liquid composition and conditions.
+    /// Flow rate is computed as inlet_flow * (1 - vapor_fraction).
+    pub fn liquid_outlet_stream(&self) -> Stream<MolarFlow> {
+        let flow = self.inlet_flow.get() * (1.0 - self.vapor_fraction.get());
+        let temp = self.temperature.get();
+        let pressure = self.pressure.get();
+
+        // Get liquid composition
+        let composition: Vec<f64> = self.liquid_composition.iter().map(|v| v.get()).collect();
+        
+        #[cfg(feature = "thermodynamics")]
+        {
+            if !self.component_names.is_empty() {
+                if let Ok(stream) = Stream::with_composition(flow, self.component_names.clone(), composition.clone()) {
+                    return stream.at_conditions(temp, pressure);
+                }
+            }
+        }
+        
+        // Fallback: create generic multicomponent stream
+        let component_names: Vec<String> = (0..self.n_components)
+            .map(|i| format!("Component_{}", i))
+            .collect();
+        
+        Stream::with_composition(flow, component_names, composition)
+            .unwrap_or_else(|_| {
+                // If composition is invalid, create a pure stream
+                Stream::new(flow, vec!["Liquid".to_string()])
+            })
+            .at_conditions(temp, pressure)
     }
 }
 
@@ -911,5 +1005,49 @@ mod tests {
         let k_water = flash.k_value(0);
         // Water at 25°C, 1 atm: K ≈ 0.031
         assert!(k_water > 0.025 && k_water < 0.04, "K_water = {}", k_water);
+    }
+
+    #[test]
+    fn test_flash_outlet_streams() {
+        let mut flash = FlashSeparator::new(10.0, 2)
+            .with_k_values(vec![3.0, 0.5])
+            .with_initial_state(350.0, 200000.0);
+
+        // Set inlet flow and feed composition
+        flash.inlet_flow = Var::new(100.0);
+        flash.set_feed_composition(vec![0.5, 0.5]);
+        flash.flash_calculation();  // Compute vapor fraction and compositions
+
+        let vapor = flash.vapor_outlet_stream();
+        let liquid = flash.liquid_outlet_stream();
+
+        // Temperature and pressure match flash conditions
+        assert_eq!(vapor.temperature, 350.0);
+        assert_eq!(vapor.pressure, 200000.0);
+        assert_eq!(liquid.temperature, 350.0);
+        assert_eq!(liquid.pressure, 200000.0);
+
+        // Flow rates computed from inlet and calculated vapor fraction
+        let vf = flash.vapor_fraction.get();
+        assert!((vapor.total_flow - 100.0 * vf).abs() < 1e-10);
+        assert!((liquid.total_flow - 100.0 * (1.0 - vf)).abs() < 1e-10);
+
+        // Total outlet flow should equal inlet
+        assert!((vapor.total_flow + liquid.total_flow - 100.0).abs() < 1e-10);
+
+        // Verify multicomponent streams have correct number of components
+        assert_eq!(vapor.n_components(), 2);
+        assert_eq!(liquid.n_components(), 2);
+
+        // Light component (K=3.0) enriched in vapor
+        assert!(vapor.get_composition(0) > liquid.get_composition(0));
+        // Heavy component (K=0.5) enriched in liquid
+        assert!(liquid.get_composition(1) > vapor.get_composition(1));
+
+        // Compositions should sum to 1.0
+        let vapor_sum: f64 = (0..2).map(|i| vapor.get_composition(i)).sum();
+        let liquid_sum: f64 = (0..2).map(|i| liquid.get_composition(i)).sum();
+        assert!((vapor_sum - 1.0).abs() < 1e-6);
+        assert!((liquid_sum - 1.0).abs() < 1e-6);
     }
 }

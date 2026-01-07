@@ -568,21 +568,24 @@ impl FlashSeparator<Initialized, Initialized> {
 
         // Get vapor composition
         let composition: Vec<f64> = self.vapor_composition.iter().map(|v| v.get()).collect();
-        
+
         #[cfg(feature = "thermodynamics")]
         {
             if !self.component_names.is_empty() {
-                if let Ok(stream) = Stream::with_composition(flow, self.component_names.clone(), composition.clone()) {
+                if let Ok(stream) = Stream::with_composition(
+                    flow,
+                    self.component_names.clone(),
+                    composition.clone(),
+                ) {
                     return stream.at_conditions(temp, pressure);
                 }
             }
         }
-        
+
         // Fallback: create generic multicomponent stream
-        let component_names: Vec<String> = (0..self.n_components)
-            .map(|i| format!("Component_{}", i))
-            .collect();
-        
+        let component_names: Vec<String> =
+            (0..self.n_components).map(|i| format!("Component_{}", i)).collect();
+
         Stream::with_composition(flow, component_names, composition)
             .unwrap_or_else(|_| {
                 // If composition is invalid, create a pure stream
@@ -602,21 +605,24 @@ impl FlashSeparator<Initialized, Initialized> {
 
         // Get liquid composition
         let composition: Vec<f64> = self.liquid_composition.iter().map(|v| v.get()).collect();
-        
+
         #[cfg(feature = "thermodynamics")]
         {
             if !self.component_names.is_empty() {
-                if let Ok(stream) = Stream::with_composition(flow, self.component_names.clone(), composition.clone()) {
+                if let Ok(stream) = Stream::with_composition(
+                    flow,
+                    self.component_names.clone(),
+                    composition.clone(),
+                ) {
                     return stream.at_conditions(temp, pressure);
                 }
             }
         }
-        
+
         // Fallback: create generic multicomponent stream
-        let component_names: Vec<String> = (0..self.n_components)
-            .map(|i| format!("Component_{}", i))
-            .collect();
-        
+        let component_names: Vec<String> =
+            (0..self.n_components).map(|i| format!("Component_{}", i)).collect();
+
         Stream::with_composition(flow, component_names, composition)
             .unwrap_or_else(|_| {
                 // If composition is invalid, create a pure stream
@@ -1016,7 +1022,7 @@ mod tests {
         // Set inlet flow and feed composition
         flash.inlet_flow = Var::new(100.0);
         flash.set_feed_composition(vec![0.5, 0.5]);
-        flash.flash_calculation();  // Compute vapor fraction and compositions
+        flash.flash_calculation(); // Compute vapor fraction and compositions
 
         let vapor = flash.vapor_outlet_stream();
         let liquid = flash.liquid_outlet_stream();

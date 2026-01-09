@@ -524,7 +524,6 @@ impl StreamType for Pressure {}
 /// assert_eq!(stream.component_flow(0), 60.0);  // Water: 60 mol/s
 /// assert_eq!(stream.component_flow(1), 40.0);  // Ethanol: 40 mol/s
 /// ```
-
 /// Error type for stream-related operations.
 #[derive(Error, Debug)]
 pub enum StreamError {
@@ -546,10 +545,10 @@ pub enum StreamError {
 /// # Examples
 ///
 /// ```
-/// use nomata::OutletRef;
+/// use nomata::{OutletRef, MolarFlow};
 ///
 /// // Create reference (doesn't compute stream yet)
-/// let outlet_ref = OutletRef::new("Heater-101", "outlet");
+/// let outlet_ref: OutletRef<MolarFlow> = OutletRef::new("Heater-101", "outlet");
 ///
 /// // Build flowsheet...
 /// // Solve flowsheet...
@@ -558,16 +557,16 @@ pub enum StreamError {
 /// // let stream = outlet_ref.get()?;
 /// ```
 #[derive(Debug, Clone)]
-pub struct OutletRef {
+pub struct OutletRef<S: StreamType + Clone = MolarFlow> {
     /// Unit name or ID
     unit_name: String,
     /// Port name
     port_name: String,
     /// Cached stream data (populated after solving)
-    stream: std::cell::RefCell<Option<Stream<MolarFlow>>>,
+    stream: std::cell::RefCell<Option<Stream<S>>>,
 }
 
-impl OutletRef {
+impl<S: StreamType + Clone> OutletRef<S> {
     /// Creates a new outlet reference.
     pub fn new(unit_name: &str, port_name: &str) -> Self {
         OutletRef {
@@ -578,7 +577,7 @@ impl OutletRef {
     }
 
     /// Gets the stream data (after solving).
-    pub fn get(&self) -> Result<Stream<MolarFlow>, StreamError> {
+    pub fn get(&self) -> Result<Stream<S>, StreamError> {
         self.stream.borrow().as_ref().cloned().ok_or_else(|| StreamError::NotAvailable {
             reason: format!("Stream from {}.{} not computed", self.unit_name, self.port_name),
             suggestion: "Solve the flowsheet first".to_string(),
@@ -586,7 +585,7 @@ impl OutletRef {
     }
 
     /// Sets the stream data (internal, called by solver).
-    pub fn set(&self, stream: Stream<MolarFlow>) {
+    pub fn set(&self, stream: Stream<S>) {
         *self.stream.borrow_mut() = Some(stream);
     }
 
@@ -2576,8 +2575,10 @@ pub struct Flowsheet<T: TimeDomain> {
     /// Complete equation system for this flowsheet
     pub equation_system: EquationSystem<T>,
     /// Pending unit operations to be harvested
-    pending_harvests: Vec<Box<dyn Fn(&mut EquationSystem<T>)>>,
+    pending_harvests: Vec<HarvestFn<T>>,
 }
+
+type HarvestFn<T> = Box<dyn Fn(&mut EquationSystem<T>)>;
 
 /// Stream data stored at a port.
 ///

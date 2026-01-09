@@ -217,19 +217,16 @@ impl NewtonRaphson {
         let mut x = x0.to_vec();
 
         let mut iterations;
-        let mut function_evals = 0;
-        let mut jacobian_evals = 0;
         let mut final_residual;
 
-        for iteration in 0..self.max_iterations {
+        for (eval_count, iteration) in (0..self.max_iterations).enumerate() {
             iterations = iteration + 1;
+            let function_evals = eval_count + 1;
+            let jacobian_evals = eval_count + 1;
 
             // Evaluate residuals and Jacobian
-
             {
                 let (residuals, jacobian_data) = f(&x);
-                function_evals += 1;
-                jacobian_evals += 1;
 
                 // Check convergence
                 let norm = residuals.iter().map(|r| r * r).sum::<f64>().sqrt();

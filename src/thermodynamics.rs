@@ -182,6 +182,18 @@ pub enum Substance {
     CustomMix(CustomMix),
 }
 
+impl From<Pure> for Substance {
+    fn from(pure: Pure) -> Self {
+        Substance::Pure(pure)
+    }
+}
+
+impl From<PredefinedMix> for Substance {
+    fn from(mix: PredefinedMix) -> Self {
+        Substance::PredefinedMix(mix)
+    }
+}
+
 impl Substance {
     /// Creates an rfluids Fluid object from this substance with optional backend configuration.
     /// Returns Fluid<Undefined> which must be converted to Fluid<Defined> via in_state().

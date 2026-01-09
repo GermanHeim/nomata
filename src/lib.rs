@@ -20,6 +20,13 @@ pub mod solvers;
 #[cfg(feature = "thermodynamics")]
 pub mod thermodynamics;
 
+// Reexport fluid substance types for easier access
+#[cfg(feature = "thermodynamics")]
+pub use thermodynamics::{
+    Substance,
+    fluids::{PredefinedMix, Pure},
+};
+
 // Reexports from differential-equations crate for ODE solving
 #[cfg(feature = "solvers")]
 pub use differential_equations::methods::{ExplicitRungeKutta, ImplicitRungeKutta};
@@ -501,10 +508,10 @@ impl StreamType for Pressure {}
 /// # Examples
 ///
 /// ```
-/// use nomata::{Stream, MolarFlow};
+/// use nomata::{Stream, MolarFlow, UninitializedConditions};
 ///
 /// // Water-Ethanol mixture
-/// let mut stream = Stream::<MolarFlow, _>::new(
+/// let mut stream = Stream::<MolarFlow, UninitializedConditions>::new(
 ///     100.0,  // Total flow: 100 mol/s
 ///     vec!["Water".to_string(), "Ethanol".to_string()],
 /// )
@@ -633,9 +640,9 @@ impl<S: StreamType> Stream<S, UninitializedConditions> {
     /// # Examples
     ///
     /// ```
-    /// use nomata::{Stream, MolarFlow};
+    /// use nomata::{Stream, MolarFlow, UninitializedConditions};
     ///
-    /// let stream = Stream::<MolarFlow, _>::new(
+    /// let stream = Stream::<MolarFlow, UninitializedConditions>::new(
     ///     100.0,
     ///     vec!["N2".to_string(), "O2".to_string(), "Ar".to_string()],
     /// )
@@ -737,6 +744,84 @@ impl<S: StreamType> Stream<S, InitializedConditions> {
             total_flow,
             composition: vec![1.0],
             components: vec![component],
+            temperature,
+            pressure,
+            _stream_type: PhantomData,
+            _condition_state: PhantomData,
+        }
+    }
+
+    /// Creates a new stream with components and their compositions (requires thermodynamics feature).
+    ///
+    /// This is the primary constructor for creating streams with thermodynamic support.
+    /// It accepts a vector of (component, mole fraction) tuples, enabling both pure
+    /// component streams and arbitrary multi-component mixtures.
+    ///
+    /// # Arguments
+    ///
+    /// * `total_flow` - Total flow rate in the stream's units (mol/s or kg/s)
+    /// * `components` - Vector of (component, mole fraction) pairs
+    /// * `temperature` - Temperature in Kelvin
+    /// * `pressure` - Pressure in Pascals
+    ///
+    /// # Type-Safety
+    ///
+    /// Components can be:
+    /// - Pure fluids: `Pure::Water`, `Pure::Nitrogen`, etc.
+    /// - Predefined mixtures: `PredefinedMix::Air`, etc.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use nomata::{Stream, MolarFlow, InitializedConditions, Pure};
+    ///
+    /// // Pure component stream
+    /// let water = Stream::<MolarFlow, InitializedConditions>::new(
+    ///     100.0,
+    ///     vec![(Pure::Water, 1.0)],
+    ///     300.0,
+    ///     101325.0,
+    /// );
+    ///
+    /// // Multi-component mixture (custom air composition)
+    /// let air = Stream::<MolarFlow, InitializedConditions>::new(
+    ///     150.0,
+    ///     vec![
+    ///         (Pure::Nitrogen, 0.79),
+    ///         (Pure::Oxygen, 0.21),
+    ///     ],
+    ///     298.15,
+    ///     101325.0,
+    /// );
+    ///
+    /// // Natural gas mixture
+    /// let natural_gas = Stream::<MolarFlow, InitializedConditions>::new(
+    ///     200.0,
+    ///     vec![
+    ///         (Pure::Methane, 0.95),
+    ///         (Pure::Ethane, 0.03),
+    ///         (Pure::Propane, 0.02),
+    ///     ],
+    ///     288.15,
+    ///     5e6,
+    /// );
+    /// ```
+    #[cfg(feature = "thermodynamics")]
+    pub fn new(
+        total_flow: f64,
+        components: Vec<(crate::thermodynamics::fluids::Pure, f64)>,
+        temperature: f64,
+        pressure: f64,
+    ) -> Self {
+        let component_names: Vec<String> =
+            components.iter().map(|(pure, _)| format!("{:?}", pure)).collect();
+
+        let composition: Vec<f64> = components.iter().map(|(_, fraction)| *fraction).collect();
+
+        Stream {
+            total_flow,
+            composition,
+            components: component_names,
             temperature,
             pressure,
             _stream_type: PhantomData,
@@ -4770,8 +4855,9 @@ mod tests {
 
     #[test]
     fn test_stream_creation() {
-        let stream = Stream::<MolarFlow, _>::new(10.0, vec!["Component".to_string()])
-            .at_conditions(298.15, 101325.0);
+        let stream =
+            Stream::<MolarFlow, UninitializedConditions>::new(10.0, vec!["Component".to_string()])
+                .at_conditions(298.15, 101325.0);
         assert_eq!(stream.total_flow, 10.0);
         assert_eq!(stream.temperature, 298.15);
         assert_eq!(stream.pressure, 101325.0);
@@ -5409,9 +5495,11 @@ mod tests {
     /// Multi-Component Stream Tests
     #[test]
     fn test_multicomponent_stream_creation() {
-        let stream =
-            Stream::<MolarFlow, _>::new(100.0, vec!["Water".to_string(), "Ethanol".to_string()])
-                .at_conditions(298.15, 101325.0);
+        let stream = Stream::<MolarFlow, UninitializedConditions>::new(
+            100.0,
+            vec!["Water".to_string(), "Ethanol".to_string()],
+        )
+        .at_conditions(298.15, 101325.0);
 
         assert_eq!(stream.total_flow, 100.0);
         assert_eq!(stream.n_components(), 2);
@@ -5421,9 +5509,11 @@ mod tests {
 
     #[test]
     fn test_multicomponent_stream_set_composition() {
-        let mut stream =
-            Stream::<MolarFlow, _>::new(100.0, vec!["N2".to_string(), "O2".to_string()])
-                .at_conditions(298.15, 101325.0);
+        let mut stream = Stream::<MolarFlow, UninitializedConditions>::new(
+            100.0,
+            vec!["N2".to_string(), "O2".to_string()],
+        )
+        .at_conditions(298.15, 101325.0);
 
         // Valid composition (sums to 1.0)
         let result = stream.set_composition(vec![0.78, 0.22]);
@@ -5442,9 +5532,11 @@ mod tests {
 
     #[test]
     fn test_multicomponent_stream_component_flows() {
-        let mut stream =
-            Stream::<MolarFlow, _>::new(100.0, vec!["Water".to_string(), "Ethanol".to_string()])
-                .at_conditions(298.15, 101325.0);
+        let mut stream = Stream::<MolarFlow, UninitializedConditions>::new(
+            100.0,
+            vec!["Water".to_string(), "Ethanol".to_string()],
+        )
+        .at_conditions(298.15, 101325.0);
 
         stream.set_composition(vec![0.6, 0.4]).unwrap();
 
@@ -5457,7 +5549,7 @@ mod tests {
 
     #[test]
     fn test_multicomponent_stream_set_component_flows() {
-        let mut stream = Stream::<MolarFlow, _>::new(
+        let mut stream = Stream::<MolarFlow, UninitializedConditions>::new(
             0.0,
             vec!["A".to_string(), "B".to_string(), "C".to_string()],
         )
@@ -5525,8 +5617,9 @@ mod tests {
         assert!(stream.validate().is_ok());
 
         // Create invalid stream with negative flow
-        let bad_stream = Stream::<MolarFlow, _>::new(-10.0, vec!["A".to_string()])
-            .at_conditions(298.15, 101325.0);
+        let bad_stream =
+            Stream::<MolarFlow, UninitializedConditions>::new(-10.0, vec!["A".to_string()])
+                .at_conditions(298.15, 101325.0);
         assert!(bad_stream.validate().is_err());
     }
 

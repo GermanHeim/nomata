@@ -7,6 +7,19 @@ use crate::thermodynamics::{Fluid, fluids::Pure};
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use thiserror::Error;
+
+/// Error type for pump operations.
+#[derive(Error, Debug)]
+pub enum PumpError {
+    #[error("Pump parameter not initialized: {parameter}")]
+    UninitializedParameter { parameter: String },
+    #[error("Stream error: {0}")]
+    StreamError(#[from] crate::StreamError),
+    #[cfg(feature = "thermodynamics")]
+    #[error("Thermodynamics error: {0}")]
+    ThermoError(#[from] crate::thermodynamics::ThermoError),
+}
 
 // Typed Equation Variable Structs (Generic for autodiff support)
 
@@ -112,6 +125,10 @@ where
     // Computed head (m)
     pub head: Var<Algebraic>,
 
+    // Composition tracking
+    pub inlet_composition: Vec<f64>,
+    pub component_names: Vec<String>,
+
     // Ports
     pub inlet: Port<Stream<MassFlow>, Input, P>,
     pub outlet: Port<Stream<MassFlow>, Output, P>,
@@ -135,6 +152,9 @@ impl Pump {
             density: None,
 
             head: Var::new(0.0),
+
+            inlet_composition: vec![1.0],
+            component_names: vec!["Unknown".to_string()],
 
             inlet: Port::new(),
             outlet: Port::new(),
@@ -167,6 +187,9 @@ impl<P: PortState> Pump<Uninitialized, P> {
             density: Some(Var::new(density)),
 
             head: self.head,
+
+            inlet_composition: self.inlet_composition,
+            component_names: self.component_names,
 
             inlet: self.inlet,
             outlet: self.outlet,
@@ -201,6 +224,9 @@ impl<P: PortState> Pump<Uninitialized, P> {
             density: Some(Var::new(props.density)),
 
             head: self.head,
+
+            inlet_composition: self.inlet_composition,
+            component_names: self.component_names,
 
             inlet: self.inlet,
             outlet: self.outlet,
@@ -261,11 +287,95 @@ impl<P: PortState> Pump<Initialized, P> {
         self.density = Some(Var::new(props.density));
         Ok(())
     }
+
+    /// Creates the outlet stream with pumped pressure.
+    ///
+    /// Returns a stream with the outlet pressure and flow rate.
+    /// For multicomponent streams, composition is preserved from inlet.
+    /// Note: Temperature is assumed constant (no work-to-heat conversion modeled) for now.
+    fn compute_outlet_stream(&self) -> Result<Stream<MassFlow>, PumpError> {
+        let flow = self
+            .volumetric_flow
+            .as_ref()
+            .ok_or_else(|| PumpError::UninitializedParameter {
+                parameter: "volumetric_flow".to_string(),
+            })?
+            .get();
+        let pressure = self.outlet_pressure.get();
+
+        #[cfg(feature = "thermodynamics")]
+        {
+            if let Some(pure) = &self.fluid {
+                let component_name = format!("{:?}", pure);
+                let stream = Stream::pure(flow, component_name, 298.15, pressure);
+                return Ok(stream);
+            }
+        }
+
+        // If we have multicomponent composition info, use it
+        if !self.component_names.is_empty()
+            && self.component_names[0] != "Unknown"
+            && let Ok(stream) = Stream::with_composition(
+                flow,
+                self.component_names.clone(),
+                self.inlet_composition.clone(),
+            )
+        {
+            return Ok(stream.at_conditions(298.15, pressure));
+        }
+
+        Err(PumpError::StreamError(crate::StreamError::MissingComposition {
+            model: "Pump".to_string(),
+            suggestion: "set_composition() or FromStream trait".to_string(),
+        }))
+    }
+
+    /// Returns a reference to the outlet stream.
+    pub fn outlet_stream(&self) -> crate::OutletRef<crate::MassFlow> {
+        crate::OutletRef::new("Pump", "outlet")
+    }
+
+    /// Populates the outlet reference with the current computed stream.
+    pub fn populate_outlet(
+        &self,
+        outlet_ref: &crate::OutletRef<crate::MassFlow>,
+    ) -> Result<(), PumpError> {
+        let stream = self.compute_outlet_stream()?;
+        outlet_ref.set(stream);
+        Ok(())
+    }
 }
 
 impl Default for Pump {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl crate::FromStream for Pump<Initialized> {
+    fn from_stream<S: crate::StreamType, C>(stream: &crate::Stream<S, C>) -> Self {
+        Pump {
+            outlet_pressure: Var::new(stream.pressure + 100000.0),
+            power: Var::new(0.0),
+
+            inlet_pressure: Some(Var::new(stream.pressure)),
+            volumetric_flow: Some(Var::new(stream.total_flow)),
+            efficiency: Some(Var::new(0.75)),
+            density: Some(Var::new(1000.0)),
+
+            head: Var::new(0.0),
+
+            inlet_composition: stream.composition.clone(),
+            component_names: stream.components.clone(),
+
+            inlet: Port::new(),
+            outlet: Port::new(),
+
+            #[cfg(feature = "thermodynamics")]
+            fluid: None,
+
+            _c: PhantomData,
+        }
     }
 }
 

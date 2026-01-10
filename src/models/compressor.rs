@@ -7,6 +7,19 @@ use crate::thermodynamics::{Fluid, fluids::Pure};
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use thiserror::Error;
+
+/// Error type for compressor operations.
+#[derive(Error, Debug)]
+pub enum CompressorError {
+    #[error("Compressor parameter not initialized: {parameter}")]
+    UninitializedParameter { parameter: String },
+    #[error("Stream error: {0}")]
+    StreamError(#[from] crate::StreamError),
+    #[cfg(feature = "thermodynamics")]
+    #[error("Thermodynamics error: {0}")]
+    ThermoError(#[from] crate::thermodynamics::ThermoError),
+}
 
 // Typed Equation Variable Structs (Generic for autodiff support)
 
@@ -51,27 +64,30 @@ pub struct OutletTempVars<S: Scalar> {
     pub t2: S,
     /// Inlet temperature
     pub t1: S,
-    /// (T2s - T1) / eta computed externally
-    pub dt_isen_eta: S,
+    /// Isentropic outlet temperature
+    pub t2s: S,
+    /// Isentropic efficiency
+    pub eta: S,
 }
 
 impl<S: Scalar> EquationVarsGeneric<S> for OutletTempVars<S> {
     fn base_names() -> &'static [&'static str] {
-        &["t2", "t1", "dt_isen_eta"]
+        &["t2", "t1", "t2s", "eta"]
     }
 
     fn from_map(vars: &HashMap<String, S>, prefix: &str) -> Option<Self> {
         Some(Self {
             t2: *vars.get(&format!("{}_t2", prefix))?,
             t1: *vars.get(&format!("{}_t1", prefix))?,
-            dt_isen_eta: *vars.get(&format!("{}_dt_isen_eta", prefix))?,
+            t2s: *vars.get(&format!("{}_t2s", prefix))?,
+            eta: *vars.get(&format!("{}_eta", prefix))?,
         })
     }
 }
 
 impl EquationVars for OutletTempVars<f64> {
     fn base_names() -> &'static [&'static str] {
-        &["t2", "t1", "dt_isen_eta"]
+        &["t2", "t1", "t2s", "eta"]
     }
 
     fn from_map(vars: &HashMap<String, f64>, prefix: &str) -> Option<Self> {
@@ -137,6 +153,10 @@ where
     pub isentropic_efficiency: Option<Var<Parameter>>,
     pub gamma: Option<Var<Parameter>>, // Cp/Cv
 
+    // Composition (pass-through for non-reactive compressor)
+    inlet_composition: Vec<f64>,
+    component_names: Vec<String>,
+
     // Ports
     pub inlet: Port<Stream<MolarFlow>, Input, P>,
     pub outlet: Port<Stream<MolarFlow>, Output, P>,
@@ -160,6 +180,9 @@ impl Compressor {
             mass_flow: None,
             isentropic_efficiency: None,
             gamma: None,
+
+            inlet_composition: vec![1.0],
+            component_names: vec!["Unknown".to_string()],
 
             inlet: Port::new(),
             outlet: Port::new(),
@@ -193,6 +216,9 @@ impl<P: PortState> Compressor<Uninitialized, P> {
             mass_flow: Some(Var::new(mass_flow)),
             isentropic_efficiency: Some(Var::new(isentropic_efficiency)),
             gamma: Some(Var::new(gamma)),
+
+            inlet_composition: self.inlet_composition,
+            component_names: self.component_names,
 
             inlet: self.inlet,
             outlet: self.outlet,
@@ -229,6 +255,9 @@ impl<P: PortState> Compressor<Uninitialized, P> {
             isentropic_efficiency: Some(Var::new(isentropic_efficiency)),
             gamma: Some(Var::new(gamma)),
 
+            inlet_composition: self.inlet_composition,
+            component_names: self.component_names,
+
             inlet: self.inlet,
             outlet: self.outlet,
 
@@ -240,15 +269,41 @@ impl<P: PortState> Compressor<Uninitialized, P> {
     }
 }
 
+// TODO: Improve use of thermodynamic properties for more accurate compression modeling
+
 // Operations only available when fully initialized
 impl<P: PortState> Compressor<Initialized, P> {
     /// Computes outlet conditions and power requirement. Only available for fully initialized compressor.
-    pub fn compute_compression(&mut self) {
-        let p1 = self.inlet_pressure.as_ref().unwrap().get();
+    pub fn compute_compression(&mut self) -> Result<(), CompressorError> {
+        let p1 = self
+            .inlet_pressure
+            .as_ref()
+            .ok_or_else(|| CompressorError::UninitializedParameter {
+                parameter: "inlet_pressure".to_string(),
+            })?
+            .get();
         let p2 = self.outlet_pressure.get();
-        let t1 = self.inlet_temp.as_ref().unwrap().get();
-        let eta = self.isentropic_efficiency.as_ref().unwrap().get();
-        let gamma = self.gamma.as_ref().unwrap().get();
+        let t1 = self
+            .inlet_temp
+            .as_ref()
+            .ok_or_else(|| CompressorError::UninitializedParameter {
+                parameter: "inlet_temp".to_string(),
+            })?
+            .get();
+        let eta = self
+            .isentropic_efficiency
+            .as_ref()
+            .ok_or_else(|| CompressorError::UninitializedParameter {
+                parameter: "isentropic_efficiency".to_string(),
+            })?
+            .get();
+        let gamma = self
+            .gamma
+            .as_ref()
+            .ok_or_else(|| CompressorError::UninitializedParameter {
+                parameter: "gamma".to_string(),
+            })?
+            .get();
 
         // Isentropic outlet temperature
         let t2_isen = t1 * (p2 / p1).powf((gamma - 1.0) / gamma);
@@ -260,16 +315,36 @@ impl<P: PortState> Compressor<Initialized, P> {
 
         // Power (assuming ideal gas)
         let cp = gamma * 287.0 / (gamma - 1.0); // For air, R = 287 J/kg*K
-        let w = self.mass_flow.as_ref().unwrap().get() * cp * (t2_actual - t1);
+        let mass_flow = self
+            .mass_flow
+            .as_ref()
+            .ok_or_else(|| CompressorError::UninitializedParameter {
+                parameter: "mass_flow".to_string(),
+            })?
+            .get();
+        let w = mass_flow * cp * (t2_actual - t1);
 
         self.power = Var::new(w);
+        Ok(())
     }
 
     #[cfg(feature = "thermodynamics")]
     /// Updates gamma using thermodynamic properties. Only available for fully initialized compressor.
-    pub fn update_gamma(&mut self, pure: Pure) -> Result<(), crate::thermodynamics::ThermoError> {
-        let temp = self.inlet_temp.as_ref().unwrap().get();
-        let pressure = self.inlet_pressure.as_ref().unwrap().get();
+    pub fn update_gamma(&mut self, pure: Pure) -> Result<(), CompressorError> {
+        let temp = self
+            .inlet_temp
+            .as_ref()
+            .ok_or_else(|| CompressorError::UninitializedParameter {
+                parameter: "inlet_temp".to_string(),
+            })?
+            .get();
+        let pressure = self
+            .inlet_pressure
+            .as_ref()
+            .ok_or_else(|| CompressorError::UninitializedParameter {
+                parameter: "inlet_pressure".to_string(),
+            })?
+            .get();
         let fluid_obj = Fluid::new(pure);
         let props = fluid_obj.props_pt(pressure, temp)?;
 
@@ -278,11 +353,97 @@ impl<P: PortState> Compressor<Initialized, P> {
         self.gamma = Some(Var::new(gamma));
         Ok(())
     }
+
+    /// Computes the outlet stream with compressed conditions (internal use).
+    ///
+    /// For flowsheet building, use `outlet_stream()` which returns a reference.
+    /// This method is called internally by the solver.
+    pub fn compute_outlet_stream(&self) -> Result<Stream<MolarFlow>, CompressorError> {
+        let flow = self
+            .mass_flow
+            .as_ref()
+            .ok_or_else(|| CompressorError::UninitializedParameter {
+                parameter: "mass_flow".to_string(),
+            })?
+            .get();
+        let pressure = self.outlet_pressure.get();
+        let temp = self.outlet_temp.get();
+
+        #[cfg(feature = "thermodynamics")]
+        {
+            if let Some(pure) = &self.fluid {
+                let component_name = format!("{:?}", pure);
+                let stream = Stream::pure(flow, component_name, temp, pressure);
+                return Ok(stream);
+            }
+        }
+
+        // If we have multicomponent composition info, use it
+        if !self.component_names.is_empty()
+            && self.component_names[0] != "Unknown"
+            && let Ok(stream) = Stream::with_composition(
+                flow,
+                self.component_names.clone(),
+                self.inlet_composition.clone(),
+            )
+        {
+            return Ok(stream.at_conditions(temp, pressure));
+        }
+
+        Err(CompressorError::StreamError(crate::StreamError::MissingComposition {
+            model: "Compressor".to_string(),
+            suggestion: "Use FromStream trait to initialize from inlet stream".to_string(),
+        }))
+    }
+
+    /// Returns a reference to the outlet stream.
+    ///
+    /// The reference doesn't contain stream data until the flowsheet is solved.
+    /// After solving, call `.get()` on the reference to access the stream.
+    pub fn outlet_stream(&self) -> crate::OutletRef {
+        crate::OutletRef::new("Compressor", "outlet")
+    }
+
+    /// Populates the outlet reference with the current computed stream.
+    ///
+    /// Call this after solving to make results accessible via `outlet_stream().get()`.
+    pub fn populate_outlet(&self, outlet_ref: &crate::OutletRef) -> Result<(), CompressorError> {
+        let stream = self.compute_outlet_stream()?;
+        outlet_ref.set(stream);
+        Ok(())
+    }
 }
 
 impl Default for Compressor {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl crate::FromStream for Compressor<Initialized> {
+    fn from_stream<S: crate::StreamType, C>(stream: &crate::Stream<S, C>) -> Self {
+        Compressor {
+            outlet_pressure: Var::new(stream.pressure * 2.0),
+            outlet_temp: Var::new(stream.temperature),
+            power: Var::new(0.0),
+
+            inlet_pressure: Some(Var::new(stream.pressure)),
+            inlet_temp: Some(Var::new(stream.temperature)),
+            mass_flow: Some(Var::new(stream.total_flow)),
+            isentropic_efficiency: Some(Var::new(0.85)),
+            gamma: Some(Var::new(1.4)),
+
+            inlet_composition: stream.composition.clone(),
+            component_names: stream.components.clone(),
+
+            inlet: Port::new(),
+            outlet: Port::new(),
+
+            #[cfg(feature = "thermodynamics")]
+            fluid: None,
+
+            _c: PhantomData,
+        }
     }
 }
 
@@ -305,7 +466,7 @@ impl<C, P: PortState> UnitOp for Compressor<C, P> {
         let actual_temp_eq = ResidualFunction::from_typed(
             &format!("{}_outlet_temp", unit_name),
             unit_name,
-            |v: OutletTempVars<f64>| v.t2 - v.t1 - v.dt_isen_eta,
+            |v: OutletTempVars<f64>| v.t2 - v.t1 - (v.t2s - v.t1) / v.eta,
         );
         system.add_algebraic(actual_temp_eq);
 
@@ -335,8 +496,8 @@ impl<C, P: PortState> UnitOp for Compressor<C, P> {
         let actual_temp_eq = ResidualFunction::from_typed_generic_with_dual(
             &format!("{}_outlet_temp", unit_name),
             unit_name,
-            |v: OutletTempVars<f64>| v.t2 - v.t1 - v.dt_isen_eta,
-            |v: OutletTempVars<Dual64>| v.t2 - v.t1 - v.dt_isen_eta,
+            |v: OutletTempVars<f64>| v.t2 - v.t1 - (v.t2s - v.t1) / v.eta,
+            |v: OutletTempVars<Dual64>| v.t2 - v.t1 - (v.t2s - v.t1) / v.eta,
         );
         system.add_algebraic(actual_temp_eq);
 
@@ -390,9 +551,51 @@ mod tests {
 
         comp.outlet_pressure = Var::new(303975.0); // 3:1 ratio
 
-        comp.compute_compression();
+        comp.compute_compression().unwrap();
 
         assert!(comp.outlet_temp.get() > 298.15);
         assert!(comp.power.get() > 0.0);
+    }
+
+    #[test]
+    fn test_compressor_outlet_stream() {
+        let inlet_stream: Stream<MolarFlow> =
+            Stream::with_composition(2.0, vec!["Air".to_string()], vec![1.0])
+                .unwrap()
+                .at_conditions(298.15, 101325.0);
+        let mut comp = Compressor::from_stream(&inlet_stream);
+        comp.outlet_pressure = Var::new(200000.0);
+        comp.compute_compression().unwrap();
+
+        let outlet_ref = comp.outlet_stream();
+        comp.populate_outlet(&outlet_ref).unwrap();
+        let outlet = outlet_ref.get().unwrap();
+
+        assert_eq!(outlet.total_flow, 2.0);
+        assert_eq!(outlet.pressure, comp.outlet_pressure.get());
+        assert_eq!(outlet.temperature, comp.outlet_temp.get());
+    }
+
+    #[test]
+    fn test_compressor_multicomponent_composition() {
+        let components = vec!["N2".to_string(), "O2".to_string()];
+        let composition = vec![0.79, 0.21];
+
+        let inlet_stream: Stream<MolarFlow> =
+            Stream::with_composition(10.0, components.clone(), composition.clone())
+                .unwrap()
+                .at_conditions(298.15, 101325.0);
+        let mut comp = Compressor::from_stream(&inlet_stream);
+        comp.outlet_pressure = Var::new(300000.0);
+        comp.compute_compression().unwrap();
+
+        let outlet_ref = comp.outlet_stream();
+        comp.populate_outlet(&outlet_ref).unwrap();
+        let outlet = outlet_ref.get().unwrap();
+
+        assert_eq!(outlet.components, components);
+        assert_eq!(outlet.composition, composition);
+        assert_eq!(outlet.total_flow, 10.0);
+        assert!(outlet.temperature > 298.15); // Should be heated by compression
     }
 }

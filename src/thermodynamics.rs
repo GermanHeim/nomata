@@ -260,6 +260,7 @@ impl Substance {
 /// interface for property calculations.
 ///
 /// Supports both pure components ([`Pure`]) and predefined mixtures ([`PredefinedMix`]).
+#[derive(Debug, Clone)]
 pub struct Fluid {
     /// The substance (pure or mixture) identifier for rfluids
     pub substance: Substance,
@@ -393,6 +394,34 @@ impl Fluid {
             .map_err(|_| ThermoError::InvalidInput("Invalid mole-based mixture".to_string()))?;
 
         Ok(Self { substance: Substance::CustomMix(custom), name: name.to_string(), backend: None })
+    }
+
+    /// Extracts component names and compositions from the fluid.
+    ///
+    /// For pure fluids, returns a single component.
+    /// For custom mixtures, returns the components from the mixture.
+    /// For predefined/binary mixtures, returns the fluid name as a single component.
+    ///
+    /// # Returns
+    ///
+    /// A tuple of (component_names, composition_fractions)
+    pub fn get_components(&self) -> (Vec<String>, Vec<f64>) {
+        match &self.substance {
+            Substance::Pure(pure) => (vec![format!("{:?}", pure)], vec![1.0]),
+            Substance::CustomMix(custom) => {
+                // Extract components from CustomMix
+                let components = custom.components();
+                let component_names: Vec<String> =
+                    components.keys().map(|pure| format!("{:?}", pure)).collect();
+                let composition: Vec<f64> =
+                    components.values().copied().collect();
+                (component_names, composition)
+            }
+            Substance::PredefinedMix(_) | Substance::BinaryMix(_) => {
+                // For predefined/binary mixes, use the fluid name
+                (vec![self.name.clone()], vec![1.0])
+            }
+        }
     }
 
     /// Creates a builder for configuring a fluid with custom backend options.

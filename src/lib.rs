@@ -750,6 +750,58 @@ impl<S: StreamType> Stream<S, InitializedConditions> {
         }
     }
 
+    /// Creates a new stream from a thermodynamics Fluid (requires thermodynamics feature).
+    /// 
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nomata::{Stream, MolarFlow, InitializedConditions, thermodynamics::{Fluid, fluids::Pure}};
+    /// use std::collections::HashMap;
+    ///
+    /// // Pure component stream
+    /// let water = Fluid::new(Pure::Water);
+    /// let stream = Stream::<MolarFlow, InitializedConditions>::from_fluid(
+    ///     100.0,
+    ///     &water,
+    ///     300.0,
+    ///     101325.0,
+    /// );
+    ///
+    /// // Multi-component mixture
+    /// let air = Fluid::new_mole_based(
+    ///     "CustomAir",
+    ///     HashMap::from([
+    ///         (Pure::Nitrogen, 0.79),
+    ///         (Pure::Oxygen, 0.21),
+    ///     ]),
+    /// ).unwrap();
+    /// let stream = Stream::<MolarFlow, InitializedConditions>::from_fluid(
+    ///     150.0,
+    ///     &air,
+    ///     298.15,
+    ///     101325.0,
+    /// );
+    /// ```
+    #[cfg(feature = "thermodynamics")]
+    pub fn from_fluid(
+        total_flow: f64,
+        fluid: &crate::thermodynamics::Fluid,
+        temperature: f64,
+        pressure: f64,
+    ) -> Self {
+        let (components, composition) = fluid.get_components();
+
+        Stream {
+            total_flow,
+            composition,
+            components,
+            temperature,
+            pressure,
+            _stream_type: PhantomData,
+            _condition_state: PhantomData,
+        }
+    }
+
     /// Creates a new stream with components and their compositions (requires thermodynamics feature).
     ///
     /// This is the primary constructor for creating streams with thermodynamic support.

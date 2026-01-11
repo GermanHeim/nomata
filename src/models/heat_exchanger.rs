@@ -162,6 +162,7 @@ pub struct HeatExchanger<H = Uninitialized, C = Uninitialized> {
     hot_flow_rate: Option<Var<Parameter>>,
     hot_heat_capacity: Option<Var<Parameter>>,
     hot_density: Option<Var<Parameter>>,
+    hot_molecular_weight: Option<f64>,
 
     // Cold side (Some when C = Initialized)
     pub cold_inlet_temp: Var<Algebraic>,
@@ -169,6 +170,13 @@ pub struct HeatExchanger<H = Uninitialized, C = Uninitialized> {
     cold_flow_rate: Option<Var<Parameter>>,
     cold_heat_capacity: Option<Var<Parameter>>,
     cold_density: Option<Var<Parameter>>,
+    cold_molecular_weight: Option<f64>,
+
+    // Composition tracking
+    hot_inlet_composition: Vec<f64>,
+    hot_component_names: Vec<String>,
+    cold_inlet_composition: Vec<f64>,
+    cold_component_names: Vec<String>,
 
     // Heat duty (computed)
     pub heat_duty: Var<Algebraic>,
@@ -204,12 +212,19 @@ impl HeatExchanger<Uninitialized, Uninitialized> {
             hot_flow_rate: None,
             hot_heat_capacity: None,
             hot_density: None,
+            hot_molecular_weight: None,
 
             cold_inlet_temp: Var::new(298.15),
             cold_outlet_temp: Var::new(320.0),
             cold_flow_rate: None,
             cold_heat_capacity: None,
             cold_density: None,
+            cold_molecular_weight: None,
+
+            hot_inlet_composition: vec![1.0],
+            hot_component_names: vec!["Unknown".to_string()],
+            cold_inlet_composition: vec![1.0],
+            cold_component_names: vec!["Unknown".to_string()],
 
             heat_duty: Var::new(0.0),
 
@@ -242,12 +257,19 @@ impl<C> HeatExchanger<Uninitialized, C> {
             hot_flow_rate: Some(Var::new(flow)),
             hot_heat_capacity: Some(Var::new(cp)),
             hot_density: Some(Var::new(density)),
+            hot_molecular_weight: None,
 
             cold_inlet_temp: self.cold_inlet_temp,
             cold_outlet_temp: self.cold_outlet_temp,
             cold_flow_rate: self.cold_flow_rate,
             cold_heat_capacity: self.cold_heat_capacity,
             cold_density: self.cold_density,
+            cold_molecular_weight: self.cold_molecular_weight,
+
+            hot_inlet_composition: self.hot_inlet_composition,
+            hot_component_names: self.hot_component_names,
+            cold_inlet_composition: self.cold_inlet_composition,
+            cold_component_names: self.cold_component_names,
 
             heat_duty: self.heat_duty,
 
@@ -287,12 +309,19 @@ impl<C> HeatExchanger<Uninitialized, C> {
             hot_flow_rate: Some(Var::new(flow)),
             hot_heat_capacity: Some(Var::new(props.cp)),
             hot_density: Some(Var::new(props.density)),
+            hot_molecular_weight: fluid_obj.molecular_weight().ok(),
 
             cold_inlet_temp: self.cold_inlet_temp,
             cold_outlet_temp: self.cold_outlet_temp,
             cold_flow_rate: self.cold_flow_rate,
             cold_heat_capacity: self.cold_heat_capacity,
             cold_density: self.cold_density,
+            cold_molecular_weight: self.cold_molecular_weight,
+
+            hot_inlet_composition: self.hot_inlet_composition,
+            hot_component_names: self.hot_component_names,
+            cold_inlet_composition: self.cold_inlet_composition,
+            cold_component_names: self.cold_component_names,
 
             heat_duty: self.heat_duty,
 
@@ -323,12 +352,19 @@ impl<H> HeatExchanger<H, Uninitialized> {
             hot_flow_rate: self.hot_flow_rate,
             hot_heat_capacity: self.hot_heat_capacity,
             hot_density: self.hot_density,
+            hot_molecular_weight: self.hot_molecular_weight,
 
             cold_inlet_temp: self.cold_inlet_temp,
             cold_outlet_temp: self.cold_outlet_temp,
             cold_flow_rate: Some(Var::new(flow)),
             cold_heat_capacity: Some(Var::new(cp)),
             cold_density: Some(Var::new(density)),
+            cold_molecular_weight: None,
+
+            hot_inlet_composition: self.hot_inlet_composition,
+            hot_component_names: self.hot_component_names,
+            cold_inlet_composition: self.cold_inlet_composition,
+            cold_component_names: self.cold_component_names,
 
             heat_duty: self.heat_duty,
 
@@ -368,12 +404,19 @@ impl<H> HeatExchanger<H, Uninitialized> {
             hot_flow_rate: self.hot_flow_rate,
             hot_heat_capacity: self.hot_heat_capacity,
             hot_density: self.hot_density,
+            hot_molecular_weight: self.hot_molecular_weight,
 
             cold_inlet_temp: self.cold_inlet_temp,
             cold_outlet_temp: self.cold_outlet_temp,
             cold_flow_rate: Some(Var::new(flow)),
             cold_heat_capacity: Some(Var::new(props.cp)),
             cold_density: Some(Var::new(props.density)),
+            cold_molecular_weight: fluid_obj.molecular_weight().ok(),
+
+            hot_inlet_composition: self.hot_inlet_composition,
+            hot_component_names: self.hot_component_names,
+            cold_inlet_composition: self.cold_inlet_composition,
+            cold_component_names: self.cold_component_names,
 
             heat_duty: self.heat_duty,
 
@@ -415,6 +458,58 @@ impl<H, C> HeatExchanger<H, C> {
 
 // Fully initialized methods
 impl HeatExchanger<Initialized, Initialized> {
+    /// Computes outlet temperatures using effectiveness-NTU method.
+    ///
+    /// Solves the counter-current heat exchanger equations to find outlet temperatures
+    /// given inlet temperatures and all other properties.
+    pub fn solve_outlet_temperatures(&mut self) {
+        // Heat capacity rates (W/K)
+        // For molar flow: C = n_dot * Cp_molar = n_dot * MW * Cp_mass
+        let c_hot = if let Some(mw) = self.hot_molecular_weight {
+            self.hot_flow_rate() * mw * self.hot_heat_capacity()
+        } else {
+            // Fallback: assume mass flow rate
+            self.hot_flow_rate() * self.hot_heat_capacity()
+        };
+
+        let c_cold = if let Some(mw) = self.cold_molecular_weight {
+            self.cold_flow_rate() * mw * self.cold_heat_capacity()
+        } else {
+            // Fallback: assume mass flow rate
+            self.cold_flow_rate() * self.cold_heat_capacity()
+        };
+
+        let c_min = c_hot.min(c_cold);
+        let c_max = c_hot.max(c_cold);
+        let c_ratio = c_min / c_max;
+
+        // Number of Transfer Units
+        let ntu = self.heat_transfer_coeff.get() * self.area.get() / c_min;
+
+        // Effectiveness for counter-current heat exchanger
+        let effectiveness = if (c_ratio - 1.0).abs() < 1e-10 {
+            // Special case: C_hot = C_cold
+            ntu / (1.0 + ntu)
+        } else {
+            let exp_term = (-ntu * (1.0 - c_ratio)).exp();
+            (1.0 - exp_term) / (1.0 - c_ratio * exp_term)
+        };
+
+        // Maximum possible heat transfer
+        let q_max = c_min * (self.hot_inlet_temp.get() - self.cold_inlet_temp.get());
+
+        // Actual heat transfer
+        let q = effectiveness * q_max;
+        self.heat_duty = Var::new(q);
+
+        // Compute outlet temperatures from energy balance
+        let t_hot_out = self.hot_inlet_temp.get() - q / c_hot;
+        let t_cold_out = self.cold_inlet_temp.get() + q / c_cold;
+
+        self.hot_outlet_temp = Var::new(t_hot_out);
+        self.cold_outlet_temp = Var::new(t_cold_out);
+    }
+
     /// Computes heat duty using LMTD method.
     ///
     /// Only available for fully initialized heat exchangers.
@@ -452,6 +547,88 @@ impl HeatExchanger<Initialized, Initialized> {
 
     pub fn cold_heat_capacity(&self) -> f64 {
         self.cold_heat_capacity.as_ref().unwrap().get()
+    }
+
+    /// Creates the hot side outlet stream.
+    ///
+    /// Returns a stream with the hot outlet temperature and flow rate.
+    /// For multicomponent streams, composition is preserved from inlet.
+    fn compute_hot_outlet_stream(&self) -> Result<Stream<MolarFlow>, crate::StreamError> {
+        let flow = self.hot_flow_rate.as_ref().unwrap().get();
+        let temp = self.hot_outlet_temp.get();
+
+        // If we have multicomponent composition info, use it
+        if !self.hot_component_names.is_empty()
+            && self.hot_component_names[0] != "Unknown"
+            && let Ok(stream) = Stream::with_composition(
+                flow,
+                self.hot_component_names.clone(),
+                self.hot_inlet_composition.clone(),
+            )
+        {
+            return Ok(stream.at_conditions(temp, 101325.0));
+        }
+
+        Err(crate::StreamError::MissingComposition {
+            model: "HeatExchanger (hot side)".to_string(),
+            suggestion: "set_hot_composition()".to_string(),
+        })
+    }
+
+    /// Creates the cold side outlet stream.
+    ///
+    /// Returns a stream with the cold outlet temperature and flow rate.
+    /// For multicomponent streams, composition is preserved from inlet.
+    fn compute_cold_outlet_stream(&self) -> Result<Stream<MolarFlow>, crate::StreamError> {
+        let flow = self.cold_flow_rate.as_ref().unwrap().get();
+        let temp = self.cold_outlet_temp.get();
+
+        // If we have multicomponent composition info, use it
+        if !self.cold_component_names.is_empty()
+            && self.cold_component_names[0] != "Unknown"
+            && let Ok(stream) = Stream::with_composition(
+                flow,
+                self.cold_component_names.clone(),
+                self.cold_inlet_composition.clone(),
+            )
+        {
+            return Ok(stream.at_conditions(temp, 101325.0));
+        }
+
+        Err(crate::StreamError::MissingComposition {
+            model: "HeatExchanger (cold side)".to_string(),
+            suggestion: "set_cold_composition()".to_string(),
+        })
+    }
+
+    /// Returns a reference to the hot outlet stream.
+    pub fn hot_outlet_stream(&self) -> crate::OutletRef {
+        crate::OutletRef::new("HeatExchanger", "hot_outlet")
+    }
+
+    /// Returns a reference to the cold outlet stream.
+    pub fn cold_outlet_stream(&self) -> crate::OutletRef {
+        crate::OutletRef::new("HeatExchanger", "cold_outlet")
+    }
+
+    /// Populates the hot outlet reference with the current computed stream.
+    pub fn populate_hot_outlet(
+        &self,
+        outlet_ref: &crate::OutletRef,
+    ) -> Result<(), crate::StreamError> {
+        let stream = self.compute_hot_outlet_stream()?;
+        outlet_ref.set(stream);
+        Ok(())
+    }
+
+    /// Populates the cold outlet reference with the current computed stream.
+    pub fn populate_cold_outlet(
+        &self,
+        outlet_ref: &crate::OutletRef,
+    ) -> Result<(), crate::StreamError> {
+        let stream = self.compute_cold_outlet_stream()?;
+        outlet_ref.set(stream);
+        Ok(())
     }
 }
 

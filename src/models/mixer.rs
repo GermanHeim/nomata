@@ -3,16 +3,35 @@
 //! # Example
 //!
 //! ```
+//! use nomata::{Stream, MolarFlow};
 //! use nomata::models::Mixer;
 //!
-//! // Type-safe initialization with 3 inlets
-//! let mixer: Mixer<3> = Mixer::new(2)  // 2 components
-//!     .with_inlets_configured();
+//! // Create inlet streams
+//! let stream1 = Stream::<MolarFlow, _>::with_composition(
+//!     100.0,
+//!     vec!["A".to_string(), "B".to_string()],
+//!     vec![0.7, 0.3],
+//! ).unwrap().at_conditions(298.15, 101325.0);
 //!
-//! // Only configured mixers can compute outlet conditions
-//! // mixer.compute_outlet();  // Compiles
+//! let stream2 = Stream::<MolarFlow, _>::with_composition(
+//!     150.0,
+//!     vec!["A".to_string(), "B".to_string()],
+//!     vec![0.3, 0.7],
+//! ).unwrap().at_conditions(310.0, 101325.0);
+//!
+//! // Initialize mixer and connect streams
+//! let mut mixer = Mixer::<2, _>::new(2).with_inlets_configured();
+//! mixer.set_inlet_streams(vec![stream1, stream2]);
+//!
+//! // Get outlet reference for later use
+//! let outlet_ref = mixer.outlet_stream();
+//!
+//! // After solver runs: mixer.populate_outlet(&outlet_ref).unwrap();
+//! // Then access: outlet_ref.get().unwrap();
 //! ```
 
+#[cfg(feature = "thermodynamics")]
+use crate::thermodynamics::Fluid;
 use crate::*;
 use std::marker::PhantomData;
 
@@ -28,14 +47,19 @@ pub struct Initialized;
 /// Type parameter `I` ensures inlet configuration before operation.
 pub struct Mixer<const N: usize, I = Initialized> {
     // Inlets (N streams)
+    pub inlet_streams: Vec<Option<Stream<MolarFlow, InitializedConditions>>>,
     pub inlet_flows: [f64; N],
     pub inlet_temps: [f64; N],
     pub inlet_compositions: Vec<[f64; N]>,
+    pub component_names: Vec<String>,
 
     // Outlet conditions (algebraic)
     pub outlet_flow: Var<Algebraic>,
     pub outlet_temp: Var<Algebraic>,
     pub outlet_composition: Vec<Var<Algebraic>>,
+
+    #[cfg(feature = "thermodynamics")]
+    pub fluid: Option<Fluid>,
 
     _state: PhantomData<I>,
 }
@@ -46,13 +70,18 @@ impl<const N: usize> Mixer<N, Uninitialized> {
     /// Call `.with_inlets_configured()` to begin using.
     pub fn new(n_components: usize) -> Self {
         Mixer {
+            inlet_streams: vec![None; N],
             inlet_flows: [0.0; N],
             inlet_temps: [298.15; N],
             inlet_compositions: vec![[0.0; N]; n_components],
+            component_names: Vec::new(),
 
             outlet_flow: Var::new(0.0),
             outlet_temp: Var::new(298.15),
             outlet_composition: (0..n_components).map(|_| Var::new(0.0)).collect(),
+
+            #[cfg(feature = "thermodynamics")]
+            fluid: None,
 
             _state: PhantomData,
         }
@@ -61,13 +90,18 @@ impl<const N: usize> Mixer<N, Uninitialized> {
     /// Marks inlets as configured, transitioning to operational state.
     pub fn with_inlets_configured(self) -> Mixer<N, Initialized> {
         Mixer {
+            inlet_streams: self.inlet_streams,
             inlet_flows: self.inlet_flows,
             inlet_temps: self.inlet_temps,
             inlet_compositions: self.inlet_compositions,
+            component_names: self.component_names,
 
             outlet_flow: self.outlet_flow,
             outlet_temp: self.outlet_temp,
             outlet_composition: self.outlet_composition,
+
+            #[cfg(feature = "thermodynamics")]
+            fluid: self.fluid,
 
             _state: PhantomData,
         }
@@ -85,6 +119,64 @@ impl<const N: usize, I> Mixer<N, I> {
 // Operational methods (only for configured mixers)
 impl<const N: usize> Mixer<N, Initialized> {
     /// Sets inlet conditions from Stream objects.
+    ///
+    /// Stores the inlet streams and extracts their properties.
+    ///
+    /// # Arguments
+    ///
+    /// * `streams` - Array of N Stream objects (moved, not borrowed)
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use nomata::{Stream, MolarFlow};
+    /// use nomata::models::Mixer;
+    ///
+    /// let stream1 = Stream::<MolarFlow, _>::with_composition(
+    ///     100.0,
+    ///     vec!["A".to_string(), "B".to_string()],
+    ///     vec![1.0, 0.0],
+    /// ).unwrap().at_conditions(298.15, 101325.0);
+    ///
+    /// let stream2 = Stream::<MolarFlow, _>::with_composition(
+    ///     100.0,
+    ///     vec!["A".to_string(), "B".to_string()],
+    ///     vec![0.0, 1.0],
+    /// ).unwrap().at_conditions(298.15, 101325.0);
+    ///
+    /// let mut mixer = Mixer::<2, _>::new(2).with_inlets_configured();
+    /// mixer.set_inlet_streams(vec![stream1, stream2]);
+    /// ```
+    pub fn set_inlet_streams(&mut self, streams: Vec<Stream<MolarFlow, InitializedConditions>>) {
+        assert_eq!(streams.len(), N, "Number of streams must match mixer inlet count");
+        assert!(!streams.is_empty(), "Mixer requires at least one inlet stream");
+
+        // Extract component names from first stream
+        self.component_names = streams[0].components.clone();
+
+        // Extract flows and temperatures
+        for (i, stream) in streams.iter().enumerate() {
+            self.inlet_flows[i] = stream.total_flow;
+            self.inlet_temps[i] = stream.temperature;
+        }
+
+        // Transpose compositions: stream.composition -> inlet_compositions[component][inlet]
+        let n_components = self.outlet_composition.len();
+        self.inlet_compositions = (0..n_components)
+            .map(|comp_idx| {
+                let mut comp_in_each_inlet = [0.0; N];
+                for (inlet_idx, stream) in streams.iter().enumerate() {
+                    comp_in_each_inlet[inlet_idx] = stream.composition[comp_idx];
+                }
+                comp_in_each_inlet
+            })
+            .collect();
+
+        // Store the streams
+        self.inlet_streams = streams.into_iter().map(Some).collect();
+    }
+
+    /// Sets inlet conditions from Stream references (extracts data without storing).
     ///
     /// # Arguments
     ///
@@ -110,10 +202,13 @@ impl<const N: usize> Mixer<N, Initialized> {
     ///
     /// let mut mixer = Mixer::<2, _>::new(2).with_inlets_configured();
     /// mixer.from_streams(&[&stream1, &stream2]);
-    /// mixer.compute_outlet();
     /// ```
     pub fn from_streams<S: crate::StreamType, C>(&mut self, streams: &[&crate::Stream<S, C>]) {
         assert_eq!(streams.len(), N, "Number of streams must match mixer inlet count");
+        assert!(!streams.is_empty(), "Mixer requires at least one inlet stream");
+
+        // Extract component names from first stream
+        self.component_names = streams[0].components.clone();
 
         // Extract flows and temperatures
         for (i, stream) in streams.iter().enumerate() {
@@ -159,7 +254,6 @@ impl<const N: usize> Mixer<N, Initialized> {
     ///         vec![0.0, 0.0, 1.0],           // Inlet 2: pure component 2
     ///     ],
     /// );
-    /// mixer.compute_outlet();
     /// ```
     pub fn set_inlets(&mut self, flows: &[f64; N], temps: &[f64; N], compositions: &[Vec<f64>]) {
         self.inlet_flows = *flows;
@@ -178,24 +272,79 @@ impl<const N: usize> Mixer<N, Initialized> {
             .collect();
     }
 
-    /// Computes outlet conditions assuming perfect mixing.
-    pub fn compute_outlet(&mut self) {
-        // Mass balance
-        let total_flow: f64 = self.inlet_flows.iter().sum();
-        self.outlet_flow = Var::new(total_flow);
+    /// Sets the fluid for thermodynamic calculations.
+    ///
+    /// This allows using pure fluids or custom mixtures.
+    /// The mixer will create outlet streams with this fluid.
+    #[cfg(feature = "thermodynamics")]
+    pub fn set_fluid(&mut self, fluid: Fluid) {
+        self.fluid = Some(fluid);
+    }
 
-        // Energy balance (mass-weighted average)
-        if total_flow > 1e-10 {
-            let total_enthalpy: f64 =
-                self.inlet_flows.iter().zip(&self.inlet_temps).map(|(f, t)| f * t).sum();
-            self.outlet_temp = Var::new(total_enthalpy / total_flow);
+    // TODO: Let the user pass deltaP/deltaT
+
+    /// Creates the outlet stream from mixer.
+    ///
+    /// Returns a stream with mixed conditions.
+    /// Note: Assumes constant pressure (pressure drop neglected).
+    /// Internal method called after solver updates variables.
+    fn compute_outlet_stream(&self) -> Result<Stream<MolarFlow>, crate::StreamError> {
+        let flow = self.outlet_flow.get();
+        let temp = self.outlet_temp.get();
+
+        // Check if outlet has been computed (non-zero flow and composition)
+        if flow < 1e-10 || self.outlet_composition.is_empty() {
+            return Err(crate::StreamError::RequiresCalculation {
+                model: "Mixer".to_string(),
+                calculation_type: "solver must update outlet variables".to_string(),
+            });
         }
 
-        // Component balances
-        for (comp_idx, comp_flows) in self.inlet_compositions.iter().enumerate() {
-            let total_comp: f64 = self.inlet_flows.iter().zip(comp_flows).map(|(f, x)| f * x).sum();
-            self.outlet_composition[comp_idx] = Var::new(total_comp / total_flow);
+        // If inlet_streams exist, use component names and calculate mixed composition
+        if !self.component_names.is_empty() {
+            // Get outlet composition (already calculated as fractions in compute_outlet)
+            let composition: Vec<f64> = self.outlet_composition.iter().map(|v| v.get()).collect();
+
+            // Get pressure from first inlet stream if available
+            let pressure = self
+                .inlet_streams
+                .iter()
+                .find_map(|opt| opt.as_ref())
+                .map(|s| s.pressure)
+                .unwrap_or(101325.0);
+
+            let stream = Stream::with_composition(flow, self.component_names.clone(), composition)
+                .map_err(|_| crate::StreamError::MissingComposition {
+                    model: "Mixer".to_string(),
+                    suggestion: "Valid inlet stream composition".to_string(),
+                })?;
+            return Ok(stream.at_conditions(temp, pressure));
         }
+
+        // Fallback: generic component names
+        let comp_values: Vec<f64> = self.outlet_composition.iter().map(|v| v.get()).collect();
+        let component_names: Vec<String> =
+            (0..comp_values.len()).map(|i| format!("Component_{}", i)).collect();
+
+        Stream::with_composition(flow, component_names, comp_values)
+            .map(|s| s.at_conditions(temp, 101325.0))
+            .map_err(|_| crate::StreamError::MissingComposition {
+                model: "Mixer".to_string(),
+                suggestion: "Set inlet streams using set_inlet_streams() or from_streams()"
+                    .to_string(),
+            })
+    }
+
+    /// Returns a reference to the outlet stream.
+    pub fn outlet_stream(&self) -> crate::OutletRef {
+        crate::OutletRef::new("Mixer", "outlet")
+    }
+
+    /// Populates the outlet reference with the current computed stream.
+    pub fn populate_outlet(&self, outlet_ref: &crate::OutletRef) -> Result<(), crate::StreamError> {
+        let stream = self.compute_outlet_stream()?;
+        outlet_ref.set(stream);
+        Ok(())
     }
 }
 
@@ -356,9 +505,65 @@ mod tests {
         let mut mixer: Mixer<2, Initialized> = Mixer::new(1).with_inlets_configured();
         mixer.inlet_flows = [10.0, 20.0];
         mixer.inlet_temps = [300.0, 350.0];
-        mixer.compute_outlet();
+
+        // Simulate what the solver would compute
+        mixer.outlet_flow = Var::new(30.0);
+        mixer.outlet_temp = Var::new(333.333);
 
         assert_eq!(mixer.outlet_flow.get(), 30.0);
         assert!((mixer.outlet_temp.get() - 333.333).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_mixer_outlet_stream() {
+        let mut mixer: Mixer<2, Initialized> = Mixer::new(1).with_inlets_configured();
+        mixer.inlet_flows = [100.0, 150.0];
+        mixer.inlet_temps = [300.0, 320.0];
+        mixer.component_names = vec!["A".to_string()];
+        mixer.inlet_compositions = vec![[1.0, 1.0]];
+
+        // Simulate what the solver would compute
+        mixer.outlet_flow = Var::new(250.0);
+        mixer.outlet_temp = Var::new(312.0);
+        mixer.outlet_composition = vec![Var::new(1.0)];
+
+        // After solver updates, outlet_stream should work
+        let outlet_ref = mixer.outlet_stream();
+        mixer.populate_outlet(&outlet_ref).unwrap();
+        let outlet = outlet_ref.get().unwrap();
+
+        assert_eq!(outlet.total_flow, 250.0);
+        assert_eq!(outlet.temperature, mixer.outlet_temp.get());
+        assert_eq!(outlet.pressure, 101325.0);
+    }
+
+    #[cfg(feature = "thermodynamics")]
+    #[test]
+    fn test_mixer_thermodynamics_support() {
+        use crate::thermodynamics::{Fluid, fluids::Pure};
+
+        // Create water streams
+        let water = Fluid::new(Pure::Water);
+        let stream1 = Stream::<MolarFlow, _>::from_fluid(100.0, &water, 300.0, 101325.0);
+        let stream2 = Stream::<MolarFlow, _>::from_fluid(150.0, &water, 320.0, 101325.0);
+
+        let mut mixer: Mixer<2, Initialized> = Mixer::new(1).with_inlets_configured();
+        mixer.set_inlet_streams(vec![stream1, stream2]);
+
+        // Simulate what the solver would compute (mass-weighted average temp)
+        mixer.outlet_flow = Var::new(250.0);
+        mixer.outlet_temp = Var::new(312.0); // (100*300 + 150*320) / 250
+        mixer.outlet_composition = vec![Var::new(1.0)];
+
+        let outlet_ref = mixer.outlet_stream();
+        mixer.populate_outlet(&outlet_ref).unwrap();
+        let outlet = outlet_ref.get().unwrap();
+
+        // Check that pure stream is created with correct flow and temperature
+        assert_eq!(outlet.total_flow, 250.0);
+        assert_eq!(outlet.temperature, mixer.outlet_temp.get());
+        assert_eq!(outlet.pressure, 101325.0);
+        assert_eq!(outlet.components[0], "Water");
+        assert_eq!(outlet.composition[0], 1.0);
     }
 }

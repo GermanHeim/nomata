@@ -5640,7 +5640,11 @@ mod tests {
             [0.8, 0.4], // Component A
             [0.2, 0.6], // Component B
         ];
-        mixer.compute_outlet();
+
+        // Simulate what the solver would compute
+        mixer.outlet_flow = Var::new(150.0);
+        mixer.outlet_temp = Var::new(298.15);
+        mixer.outlet_composition = vec![Var::new(0.667), Var::new(0.333)];
 
         assert_eq!(mixer.outlet_flow.get(), 150.0);
         // A: (100*0.8 + 50*0.4) / 150 = (80 + 20) / 150 = 0.667

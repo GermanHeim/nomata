@@ -751,7 +751,7 @@ impl<S: StreamType> Stream<S, InitializedConditions> {
     }
 
     /// Creates a new stream from a thermodynamics Fluid (requires thermodynamics feature).
-    /// 
+    ///
     /// # Example
     ///
     /// ```ignore

@@ -14,7 +14,7 @@
 //! ```
 
 #[cfg(feature = "thermodynamics")]
-use crate::thermodynamics::fluids::Pure;
+use crate::thermodynamics::Fluid;
 use crate::*;
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -99,6 +99,7 @@ pub struct Initialized;
 /// Type parameter `S` ensures split fractions are set before operation.
 pub struct Splitter<const N: usize, S = Uninitialized> {
     // Inlet
+    pub inlet_stream: Option<Stream<MolarFlow, InitializedConditions>>,
     pub inlet_flow: f64,
     pub inlet_temp: f64,
     pub inlet_composition: Vec<f64>,
@@ -112,7 +113,7 @@ pub struct Splitter<const N: usize, S = Uninitialized> {
     pub outlet_temps: [Var<Algebraic>; N],
 
     #[cfg(feature = "thermodynamics")]
-    pub fluid: Option<Pure>,
+    pub fluid: Option<Fluid>,
 
     _state: PhantomData<S>,
 }
@@ -123,6 +124,7 @@ impl<const N: usize> Splitter<N, Uninitialized> {
     /// Call `.with_split_fractions()` to configure split ratios.
     pub fn new() -> Self {
         Splitter {
+            inlet_stream: None,
             inlet_flow: 0.0,
             inlet_temp: 298.15,
             inlet_composition: Vec::new(),
@@ -147,6 +149,7 @@ impl<const N: usize> Splitter<N, Uninitialized> {
         assert!((sum - 1.0).abs() < 1e-6, "Split fractions must sum to 1.0, got {}", sum);
 
         Splitter {
+            inlet_stream: self.inlet_stream,
             inlet_flow: self.inlet_flow,
             inlet_temp: self.inlet_temp,
             inlet_composition: self.inlet_composition,
@@ -214,6 +217,34 @@ impl<const N: usize> Splitter<N, Initialized> {
             .collect()
     }
 
+    /// Sets inlet stream and extracts properties.
+    ///
+    /// Stores the inlet stream and extracts its properties.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use nomata::{Stream, MolarFlow, InitializedConditions};
+    ///
+    /// // Multicomponent stream
+    /// let stream = Stream::<MolarFlow, _>::with_composition(
+    ///     100.0,
+    ///     vec!["N2", "O2"],
+    ///     vec![0.79, 0.21],
+    /// ).unwrap().at_conditions(298.15, 101325.0);
+    ///
+    /// let mut splitter = Splitter::new().with_split_fractions([0.6, 0.4]);
+    /// splitter.set_inlet_stream(stream);
+    /// splitter.compute_outlets();
+    /// ```
+    pub fn set_inlet_stream(&mut self, stream: Stream<MolarFlow, InitializedConditions>) {
+        self.inlet_flow = stream.total_flow;
+        self.inlet_temp = stream.temperature;
+        self.inlet_composition = stream.composition.clone();
+        self.component_names = stream.components.clone();
+        self.inlet_stream = Some(stream);
+    }
+
     // TODO: Let user set a deltaP or deltaT if desired
 
     /// Creates an outlet stream for the specified index.
@@ -227,16 +258,18 @@ impl<const N: usize> Splitter<N, Initialized> {
         let flow = self.outlet_flows[idx].get();
         let temp = self.outlet_temps[idx].get();
 
-        #[cfg(feature = "thermodynamics")]
-        {
-            if let Some(pure) = &self.fluid {
-                let component_name = format!("{:?}", pure);
-                let stream = Stream::pure(flow, component_name, temp, 101325.0);
-                return Ok(stream);
-            }
+        // If inlet_stream exists, use it to create outlet with proper composition
+        if let Some(ref inlet) = self.inlet_stream {
+            let stream =
+                Stream::with_composition(flow, inlet.components.clone(), inlet.composition.clone())
+                    .map_err(|_| crate::StreamError::MissingComposition {
+                        model: "Splitter".to_string(),
+                        suggestion: "Valid inlet stream composition".to_string(),
+                    })?;
+            return Ok(stream.at_conditions(temp, inlet.pressure));
         }
 
-        // If we have multicomponent composition info, use it
+        // Fallback: use component_names and composition if available
         if !self.component_names.is_empty()
             && let Ok(stream) = Stream::with_composition(
                 flow,
@@ -249,7 +282,7 @@ impl<const N: usize> Splitter<N, Initialized> {
 
         Err(crate::StreamError::MissingComposition {
             model: "Splitter".to_string(),
-            suggestion: "inlet_composition and component_names fields".to_string(),
+            suggestion: "Set inlet stream using set_inlet_stream()".to_string(),
         })
     }
 
@@ -445,13 +478,15 @@ mod tests {
     #[cfg(feature = "thermodynamics")]
     #[test]
     fn test_splitter_thermodynamics_support() {
-        use crate::thermodynamics::fluids::Pure;
+        use crate::thermodynamics::{Fluid, fluids::Pure};
+
+        // Create water stream
+        let water = Fluid::new(Pure::Water);
+        let stream = Stream::<MolarFlow, _>::from_fluid(100.0, &water, 300.0, 101325.0);
 
         let mut splitter: Splitter<2, Initialized> =
             Splitter::new().with_split_fractions([0.4, 0.6]);
-        splitter.inlet_flow = 100.0;
-        splitter.inlet_temp = 300.0;
-        splitter.fluid = Some(Pure::Water);
+        splitter.set_inlet_stream(stream);
         splitter.compute_outlets();
 
         let outlet0_ref = splitter.outlet_stream(0);
@@ -472,5 +507,114 @@ mod tests {
         assert_eq!(outlet1.temperature, 300.0);
         assert_eq!(outlet1.pressure, 101325.0);
         assert_eq!(outlet1.components[0], "Water");
+    }
+
+    #[cfg(feature = "thermodynamics")]
+    #[test]
+    fn test_splitter_custom_mixture_support() {
+        use crate::thermodynamics::{Fluid, fluids::Pure};
+        use std::collections::HashMap;
+
+        // Create a custom mole-based mixture (simplified air)
+        let mixture = Fluid::new_mole_based(
+            "CustomAir",
+            HashMap::from([(Pure::Nitrogen, 0.78), (Pure::Oxygen, 0.21), (Pure::Argon, 0.01)]),
+        )
+        .unwrap();
+
+        let stream = Stream::<MolarFlow, _>::from_fluid(100.0, &mixture, 298.15, 101325.0);
+
+        let mut splitter: Splitter<2, Initialized> =
+            Splitter::new().with_split_fractions([0.3, 0.7]);
+        splitter.set_inlet_stream(stream);
+        splitter.compute_outlets();
+
+        let outlet0_ref = splitter.outlet_stream(0);
+        splitter.populate_outlet(0, &outlet0_ref).unwrap();
+        let outlet0 = outlet0_ref.get().unwrap();
+
+        let outlet1_ref = splitter.outlet_stream(1);
+        splitter.populate_outlet(1, &outlet1_ref).unwrap();
+        let outlet1 = outlet1_ref.get().unwrap();
+
+        // Check that mixture streams are created with correct flows and multicomponent composition
+        assert_eq!(outlet0.total_flow, 30.0);
+        assert_eq!(outlet0.temperature, 298.15);
+        assert_eq!(outlet0.pressure, 101325.0);
+        assert_eq!(outlet0.components.len(), 3);
+        assert!(outlet0.components.contains(&"Nitrogen".to_string()));
+        assert!(outlet0.components.contains(&"Oxygen".to_string()));
+        assert!(outlet0.components.contains(&"Argon".to_string()));
+
+        assert_eq!(outlet1.total_flow, 70.0);
+        assert_eq!(outlet1.temperature, 298.15);
+        assert_eq!(outlet1.pressure, 101325.0);
+        assert_eq!(outlet1.components.len(), 3);
+    }
+
+    #[cfg(feature = "thermodynamics")]
+    #[test]
+    fn test_splitter_with_multicomponent_thermodynamics() {
+        use crate::thermodynamics::{Fluid, fluids::Pure};
+        use std::collections::HashMap;
+
+        // Create a mole-based mixture of ethylene (C2H4) and propylene (C3H6)
+        let mixture = Fluid::new_mole_based(
+            "C2H4-C3H6",
+            HashMap::from([(Pure::Ethylene, 0.6), (Pure::Propylene, 0.4)]),
+        )
+        .unwrap();
+
+        // Create a stream directly from the mixture
+        let stream = Stream::<MolarFlow, _>::from_fluid(200.0, &mixture, 350.0, 200000.0);
+
+        // Create and configure splitter
+        let mut splitter: Splitter<2, Initialized> =
+            Splitter::new().with_split_fractions([0.35, 0.65]);
+
+        // Set inlet stream (contains all component information)
+        splitter.set_inlet_stream(stream);
+        splitter.compute_outlets();
+
+        // Verify inlet properties were extracted correctly
+        assert_eq!(splitter.inlet_flow, 200.0);
+        assert_eq!(splitter.inlet_temp, 350.0);
+
+        // Verify components are present (order may vary due to HashMap)
+        assert_eq!(splitter.component_names.len(), 2);
+        assert!(splitter.component_names.contains(&"Ethylene".to_string()));
+        assert!(splitter.component_names.contains(&"Propylene".to_string()));
+
+        // Composition should sum to 1.0
+        let comp_sum: f64 = splitter.inlet_composition.iter().sum();
+        assert!((comp_sum - 1.0).abs() < 1e-6);
+        assert_eq!(splitter.inlet_composition.len(), 2);
+
+        // Get outlet streams
+        let outlet0_ref = splitter.outlet_stream(0);
+        splitter.populate_outlet(0, &outlet0_ref).unwrap();
+        let outlet0 = outlet0_ref.get().unwrap();
+
+        let outlet1_ref = splitter.outlet_stream(1);
+        splitter.populate_outlet(1, &outlet1_ref).unwrap();
+        let outlet1 = outlet1_ref.get().unwrap();
+
+        // Verify split flows
+        assert_eq!(outlet0.total_flow, 70.0); // 200 * 0.35
+        assert_eq!(outlet1.total_flow, 130.0); // 200 * 0.65
+
+        // Verify temperatures are preserved
+        assert_eq!(outlet0.temperature, 350.0);
+        assert_eq!(outlet1.temperature, 350.0);
+
+        // Verify pressure is preserved
+        assert_eq!(outlet0.pressure, 200000.0);
+        assert_eq!(outlet1.pressure, 200000.0);
+
+        // Verify multicomponent composition is preserved (not collapsed to single component)
+        assert_eq!(outlet0.components.len(), 2);
+        assert_eq!(outlet1.components.len(), 2);
+        assert!(outlet0.components.contains(&"Ethylene".to_string()));
+        assert!(outlet0.components.contains(&"Propylene".to_string()));
     }
 }

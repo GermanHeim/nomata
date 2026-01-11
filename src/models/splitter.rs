@@ -433,7 +433,7 @@ mod tests {
             Splitter::new().with_split_fractions([0.3, 0.7]);
         splitter.inlet_flow = 100.0;
         splitter.inlet_temp = 350.0;
-        
+
         // Simulate what the solver would compute
         splitter.outlet_flows[0] = Var::new(30.0);
         splitter.outlet_flows[1] = Var::new(70.0);
@@ -458,7 +458,7 @@ mod tests {
         splitter.inlet_temp = 310.0;
         splitter.component_names = vec!["Mixture".to_string()];
         splitter.inlet_composition = vec![1.0];
-        
+
         // Simulate what the solver would compute
         splitter.outlet_flows = [Var::new(50.0), Var::new(30.0), Var::new(20.0)];
         splitter.outlet_temps = [Var::new(310.0), Var::new(310.0), Var::new(310.0)];
@@ -493,7 +493,7 @@ mod tests {
         let mut splitter: Splitter<2, Initialized> =
             Splitter::new().with_split_fractions([0.4, 0.6]);
         splitter.set_inlet_stream(stream);
-        
+
         // Simulate what the solver would compute
         splitter.outlet_flows = [Var::new(40.0), Var::new(60.0)];
         splitter.outlet_temps = [Var::new(300.0), Var::new(300.0)];
@@ -536,7 +536,7 @@ mod tests {
         let mut splitter: Splitter<2, Initialized> =
             Splitter::new().with_split_fractions([0.3, 0.7]);
         splitter.set_inlet_stream(stream);
-        
+
         // Simulate what the solver would compute
         splitter.outlet_flows = [Var::new(30.0), Var::new(70.0)];
         splitter.outlet_temps = [Var::new(298.15), Var::new(298.15)];
@@ -586,7 +586,7 @@ mod tests {
 
         // Set inlet stream (contains all component information)
         splitter.set_inlet_stream(stream);
-        
+
         // Simulate what the solver would compute for now
         splitter.outlet_flows = [Var::new(70.0), Var::new(130.0)];
         splitter.outlet_temps = [Var::new(350.0), Var::new(350.0)];

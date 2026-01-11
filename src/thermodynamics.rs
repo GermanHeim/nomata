@@ -413,8 +413,7 @@ impl Fluid {
                 let components = custom.components();
                 let component_names: Vec<String> =
                     components.keys().map(|pure| format!("{:?}", pure)).collect();
-                let composition: Vec<f64> =
-                    components.values().copied().collect();
+                let composition: Vec<f64> = components.values().copied().collect();
                 (component_names, composition)
             }
             Substance::PredefinedMix(_) | Substance::BinaryMix(_) => {

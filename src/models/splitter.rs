@@ -13,6 +13,8 @@
 //! // splitter.compute_outlets();  // Compiles
 //! ```
 
+#[cfg(feature = "thermodynamics")]
+use crate::thermodynamics::fluids::Pure;
 use crate::*;
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -109,6 +111,9 @@ pub struct Splitter<const N: usize, S = Uninitialized> {
     pub outlet_flows: [Var<Algebraic>; N],
     pub outlet_temps: [Var<Algebraic>; N],
 
+    #[cfg(feature = "thermodynamics")]
+    pub fluid: Option<Pure>,
+
     _state: PhantomData<S>,
 }
 
@@ -127,6 +132,9 @@ impl<const N: usize> Splitter<N, Uninitialized> {
 
             outlet_flows: std::array::from_fn(|_| Var::new(0.0)),
             outlet_temps: std::array::from_fn(|_| Var::new(298.15)),
+
+            #[cfg(feature = "thermodynamics")]
+            fluid: None,
 
             _state: PhantomData,
         }
@@ -148,6 +156,9 @@ impl<const N: usize> Splitter<N, Uninitialized> {
 
             outlet_flows: self.outlet_flows,
             outlet_temps: self.outlet_temps,
+
+            #[cfg(feature = "thermodynamics")]
+            fluid: self.fluid,
 
             _state: PhantomData,
         }
@@ -215,6 +226,15 @@ impl<const N: usize> Splitter<N, Initialized> {
 
         let flow = self.outlet_flows[idx].get();
         let temp = self.outlet_temps[idx].get();
+
+        #[cfg(feature = "thermodynamics")]
+        {
+            if let Some(pure) = &self.fluid {
+                let component_name = format!("{:?}", pure);
+                let stream = Stream::pure(flow, component_name, temp, 101325.0);
+                return Ok(stream);
+            }
+        }
 
         // If we have multicomponent composition info, use it
         if !self.component_names.is_empty()
@@ -420,5 +440,37 @@ mod tests {
         assert_eq!(outlet0.temperature, 310.0);
         assert_eq!(outlet1.total_flow, 30.0);
         assert_eq!(outlet2.total_flow, 20.0);
+    }
+
+    #[cfg(feature = "thermodynamics")]
+    #[test]
+    fn test_splitter_thermodynamics_support() {
+        use crate::thermodynamics::fluids::Pure;
+
+        let mut splitter: Splitter<2, Initialized> =
+            Splitter::new().with_split_fractions([0.4, 0.6]);
+        splitter.inlet_flow = 100.0;
+        splitter.inlet_temp = 300.0;
+        splitter.fluid = Some(Pure::Water);
+        splitter.compute_outlets();
+
+        let outlet0_ref = splitter.outlet_stream(0);
+        splitter.populate_outlet(0, &outlet0_ref).unwrap();
+        let outlet0 = outlet0_ref.get().unwrap();
+
+        let outlet1_ref = splitter.outlet_stream(1);
+        splitter.populate_outlet(1, &outlet1_ref).unwrap();
+        let outlet1 = outlet1_ref.get().unwrap();
+
+        // Check that pure streams are created with correct flows and temperatures
+        assert_eq!(outlet0.total_flow, 40.0);
+        assert_eq!(outlet0.temperature, 300.0);
+        assert_eq!(outlet0.pressure, 101325.0);
+        assert_eq!(outlet0.components[0], "Water");
+
+        assert_eq!(outlet1.total_flow, 60.0);
+        assert_eq!(outlet1.temperature, 300.0);
+        assert_eq!(outlet1.pressure, 101325.0);
+        assert_eq!(outlet1.components[0], "Water");
     }
 }

@@ -100,6 +100,7 @@ pub struct Splitter<const N: usize, S = Uninitialized> {
     pub inlet_flow: f64,
     pub inlet_temp: f64,
     pub inlet_composition: Vec<f64>,
+    pub component_names: Vec<String>,
 
     // Split fractions (Some when S = Initialized)
     split_fractions: Option<[Var<Parameter>; N]>,
@@ -120,6 +121,7 @@ impl<const N: usize> Splitter<N, Uninitialized> {
             inlet_flow: 0.0,
             inlet_temp: 298.15,
             inlet_composition: Vec::new(),
+            component_names: Vec::new(),
 
             split_fractions: None,
 
@@ -140,6 +142,7 @@ impl<const N: usize> Splitter<N, Uninitialized> {
             inlet_flow: self.inlet_flow,
             inlet_temp: self.inlet_temp,
             inlet_composition: self.inlet_composition,
+            component_names: self.component_names,
 
             split_fractions: Some(fractions.map(Var::new)),
 
@@ -198,6 +201,52 @@ impl<const N: usize> Splitter<N, Initialized> {
             .iter()
             .map(|f| f.get())
             .collect()
+    }
+
+    // TODO: Let user set a deltaP or deltaT if desired
+
+    /// Creates an outlet stream for the specified index.
+    ///
+    /// Returns a stream with the split flow and same conditions as inlet.
+    /// For multicomponent streams, composition is preserved from inlet.
+    /// Note: Assumes constant pressure and temperature.
+    fn compute_outlet_stream(&self, idx: usize) -> Result<Stream<MolarFlow>, crate::StreamError> {
+        assert!(idx < N, "Outlet index {} out of range (max {})", idx, N - 1);
+
+        let flow = self.outlet_flows[idx].get();
+        let temp = self.outlet_temps[idx].get();
+
+        // If we have multicomponent composition info, use it
+        if !self.component_names.is_empty()
+            && let Ok(stream) = Stream::with_composition(
+                flow,
+                self.component_names.clone(),
+                self.inlet_composition.clone(),
+            )
+        {
+            return Ok(stream.at_conditions(temp, 101325.0));
+        }
+
+        Err(crate::StreamError::MissingComposition {
+            model: "Splitter".to_string(),
+            suggestion: "inlet_composition and component_names fields".to_string(),
+        })
+    }
+
+    /// Returns a reference to the outlet stream at the specified index.
+    pub fn outlet_stream(&self, idx: usize) -> crate::OutletRef {
+        crate::OutletRef::new("Splitter", &format!("outlet_{}", idx))
+    }
+
+    /// Populates the outlet reference at the specified index with the current computed stream.
+    pub fn populate_outlet(
+        &self,
+        idx: usize,
+        outlet_ref: &crate::OutletRef,
+    ) -> Result<(), crate::StreamError> {
+        let stream = self.compute_outlet_stream(idx)?;
+        outlet_ref.set(stream);
+        Ok(())
     }
 }
 
@@ -343,5 +392,33 @@ mod tests {
     #[should_panic(expected = "Split fractions must sum to 1.0")]
     fn test_splitter_invalid_fractions() {
         let _: Splitter<2, Initialized> = Splitter::new().with_split_fractions([0.6, 0.5]); // Sum > 1.0
+    }
+
+    #[test]
+    fn test_splitter_outlet_streams() {
+        let mut splitter: Splitter<3, Initialized> =
+            Splitter::new().with_split_fractions([0.5, 0.3, 0.2]);
+        splitter.inlet_flow = 100.0;
+        splitter.inlet_temp = 310.0;
+        splitter.component_names = vec!["Mixture".to_string()];
+        splitter.inlet_composition = vec![1.0];
+        splitter.compute_outlets();
+
+        let outlet0_ref = splitter.outlet_stream(0);
+        splitter.populate_outlet(0, &outlet0_ref).unwrap();
+        let outlet0 = outlet0_ref.get().unwrap();
+
+        let outlet1_ref = splitter.outlet_stream(1);
+        splitter.populate_outlet(1, &outlet1_ref).unwrap();
+        let outlet1 = outlet1_ref.get().unwrap();
+
+        let outlet2_ref = splitter.outlet_stream(2);
+        splitter.populate_outlet(2, &outlet2_ref).unwrap();
+        let outlet2 = outlet2_ref.get().unwrap();
+
+        assert_eq!(outlet0.total_flow, 50.0);
+        assert_eq!(outlet0.temperature, 310.0);
+        assert_eq!(outlet1.total_flow, 30.0);
+        assert_eq!(outlet2.total_flow, 20.0);
     }
 }

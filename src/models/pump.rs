@@ -3,7 +3,10 @@
 use crate::*;
 
 #[cfg(feature = "thermodynamics")]
-use crate::thermodynamics::{Fluid, fluids::Pure};
+use crate::thermodynamics::Fluid;
+
+#[cfg(feature = "thermodynamics")]
+pub use rfluids::prelude::Pure;
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -134,7 +137,7 @@ where
     pub outlet: Port<Stream<MassFlow>, Output, P>,
 
     #[cfg(feature = "thermodynamics")]
-    pub fluid: Option<Pure>,
+    pub fluid: Option<Fluid>,
 
     _c: PhantomData<C>,
 }
@@ -203,16 +206,59 @@ impl<P: PortState> Pump<Uninitialized, P> {
 
     #[cfg(feature = "thermodynamics")]
     /// Sets pump configuration with density from thermodynamic properties.
+    ///
+    /// Automatically handles both pure components and mixtures:
+    /// - For a single component (pure): density calculated directly from component properties
+    /// - For mixtures: uses mole-fraction weighted mixing rules for density
+    ///
+    /// # Arguments
+    /// * `components` - Vector of Pure components (single element for pure, multiple for mixture)
+    /// * `mole_fractions` - Mole fractions for each component (must sum to 1.0)
     pub fn with_configuration_from_fluid(
         self,
         inlet_pressure: f64,
         volumetric_flow: f64,
         efficiency: f64,
         temperature: f64,
-        pure: Pure,
+        components: Vec<Pure>,
+        mole_fractions: Vec<f64>,
     ) -> Result<Pump<Initialized, P>, crate::thermodynamics::ThermoError> {
-        let fluid_obj = Fluid::new(pure);
-        let props = fluid_obj.props_pt(inlet_pressure, temperature)?;
+        if components.len() != mole_fractions.len() {
+            return Err(crate::thermodynamics::ThermoError::InvalidInput(
+                "Number of components must match number of mole fractions".to_string(),
+            ));
+        }
+
+        if components.is_empty() {
+            return Err(crate::thermodynamics::ThermoError::InvalidInput(
+                "At least one component must be provided".to_string(),
+            ));
+        }
+
+        let sum: f64 = mole_fractions.iter().sum();
+        if (sum - 1.0).abs() > 1e-6 {
+            return Err(crate::thermodynamics::ThermoError::InvalidInput(format!(
+                "Mole fractions must sum to 1.0, got {}",
+                sum
+            )));
+        }
+
+        // Calculate mixture density using mixing rules
+        let mut density_mix = 0.0;
+        let mut component_names = Vec::new();
+
+        for (i, pure) in components.iter().enumerate() {
+            let fluid = Fluid::new(*pure);
+            let props = fluid.props_pt(inlet_pressure, temperature)?;
+
+            // For liquids, use mass-weighted average (1/rho_mix = sum(w_i/rho_i))
+            // For simplicity using mole-fraction weighted average
+            density_mix += mole_fractions[i] * props.density;
+            component_names.push(fluid.name.clone());
+        }
+
+        // For pure components, store the fluid object
+        let fluid = if components.len() == 1 { Some(Fluid::new(components[0])) } else { None };
 
         Ok(Pump {
             outlet_pressure: self.outlet_pressure,
@@ -221,18 +267,18 @@ impl<P: PortState> Pump<Uninitialized, P> {
             inlet_pressure: Some(Var::new(inlet_pressure)),
             volumetric_flow: Some(Var::new(volumetric_flow)),
             efficiency: Some(Var::new(efficiency)),
-            density: Some(Var::new(props.density)),
+            density: Some(Var::new(density_mix)),
 
             head: self.head,
 
-            inlet_composition: self.inlet_composition,
-            component_names: self.component_names,
+            inlet_composition: mole_fractions,
+            component_names,
 
             inlet: self.inlet,
             outlet: self.outlet,
 
             #[cfg(feature = "thermodynamics")]
-            fluid: Some(pure),
+            fluid,
 
             _c: PhantomData,
         })
@@ -271,20 +317,67 @@ impl<P: PortState> Pump<Initialized, P> {
     }
 
     #[cfg(feature = "thermodynamics")]
-    /// Updates density from thermodynamic properties. Only available for fully initialized pump.
+    /// Updates density from thermodynamic properties.
+    /// Only available for fully initialized pump.
+    ///
+    /// Automatically handles both pure components and mixtures based on input.
+    ///
+    /// # Arguments
+    /// * `temp` - Temperature in Kelvin
+    /// * `components` - Vector of Pure components (single element for pure, multiple for mixture)
+    /// * `mole_fractions` - Mole fractions for each component (must sum to 1.0)
     pub fn update_density(
         &mut self,
         temp: f64,
-        pure: Pure,
+        components: Vec<Pure>,
+        mole_fractions: Vec<f64>,
     ) -> Result<(), crate::thermodynamics::ThermoError> {
+        if components.len() != mole_fractions.len() {
+            return Err(crate::thermodynamics::ThermoError::InvalidInput(
+                "Number of components must match number of mole fractions".to_string(),
+            ));
+        }
+
+        if components.is_empty() {
+            return Err(crate::thermodynamics::ThermoError::InvalidInput(
+                "At least one component must be provided".to_string(),
+            ));
+        }
+
+        let sum: f64 = mole_fractions.iter().sum();
+        if (sum - 1.0).abs() > 1e-6 {
+            return Err(crate::thermodynamics::ThermoError::InvalidInput(format!(
+                "Mole fractions must sum to 1.0, got {}",
+                sum
+            )));
+        }
+
         let pressure = self
             .inlet_pressure
             .as_ref()
             .expect("inlet_pressure should be set for Initialized pump")
             .get();
-        let fluid_obj = Fluid::new(pure);
-        let props = fluid_obj.props_pt(pressure, temp)?;
-        self.density = Some(Var::new(props.density));
+
+        // Calculate mixture density using mixing rules
+        let mut density_mix = 0.0;
+
+        for (i, pure) in components.iter().enumerate() {
+            let fluid = Fluid::new(*pure);
+            let props = fluid.props_pt(pressure, temp)?;
+
+            density_mix += mole_fractions[i] * props.density;
+        }
+
+        self.density = Some(Var::new(density_mix));
+        self.inlet_composition = mole_fractions;
+
+        // Update fluid object for pure components
+        if components.len() == 1 {
+            self.fluid = Some(Fluid::new(components[0]));
+        } else {
+            self.fluid = None;
+        }
+
         Ok(())
     }
 
@@ -305,8 +398,8 @@ impl<P: PortState> Pump<Initialized, P> {
 
         #[cfg(feature = "thermodynamics")]
         {
-            if let Some(pure) = &self.fluid {
-                let component_name = format!("{:?}", pure);
+            if let Some(fluid) = &self.fluid {
+                let component_name = fluid.name.clone();
                 let stream = Stream::pure(flow, component_name, 298.15, pressure);
                 return Ok(stream);
             }
@@ -491,5 +584,73 @@ mod tests {
 
         // Head should be (202650 - 101325) / (1000 * 9.80665) aprox 10.33 m
         assert!((pump.head.get() - 10.33).abs() < 0.01);
+    }
+
+    #[test]
+    #[cfg(feature = "thermodynamics")]
+    fn test_pump_with_pure_thermodynamics() {
+        use crate::models::pump::Pure;
+
+        let pump: Result<Pump<Initialized>, _> = Pump::new().with_configuration_from_fluid(
+            101325.0,
+            0.001,
+            0.75,
+            298.15,
+            vec![Pure::Water],
+            vec![1.0],
+        );
+
+        assert!(pump.is_ok());
+        let pump = pump.unwrap();
+
+        let density = pump.density.as_ref().unwrap().get();
+        assert!(density > 900.0 && density < 1100.0);
+        assert!(pump.fluid.is_some());
+    }
+
+    #[test]
+    #[cfg(feature = "thermodynamics")]
+    fn test_pump_with_mixture_thermodynamics() {
+        use crate::models::pump::Pure;
+
+        let components = vec![Pure::Water, Pure::Ethanol];
+        let mole_fractions = vec![0.5, 0.5];
+
+        let pump: Result<Pump<Initialized>, _> = Pump::new().with_configuration_from_fluid(
+            101325.0,
+            0.001,
+            0.75,
+            298.15,
+            components,
+            mole_fractions.clone(),
+        );
+
+        assert!(pump.is_ok());
+        let pump = pump.unwrap();
+
+        let density = pump.density.as_ref().unwrap().get();
+        assert!(density > 700.0);
+
+        assert_eq!(pump.inlet_composition, mole_fractions);
+        assert!(pump.fluid.is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "thermodynamics")]
+    fn test_update_density() {
+        use crate::models::pump::Pure;
+
+        let mut pump: Pump<Initialized> =
+            Pump::new().with_configuration(101325.0, 0.001, 0.75, 1000.0);
+
+        let components = vec![Pure::Water];
+        let mole_fractions = vec![1.0];
+
+        let result = pump.update_density(298.15, components, mole_fractions.clone());
+        assert!(result.is_ok());
+
+        let density = pump.density.as_ref().unwrap().get();
+        assert!(density > 900.0 && density < 1100.0);
+        assert_eq!(pump.inlet_composition, mole_fractions);
     }
 }

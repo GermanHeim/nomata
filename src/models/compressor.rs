@@ -3,7 +3,10 @@
 use crate::*;
 
 #[cfg(feature = "thermodynamics")]
-use crate::thermodynamics::{Fluid, fluids::Pure};
+use crate::thermodynamics::Fluid;
+
+#[cfg(feature = "thermodynamics")]
+pub use rfluids::prelude::Pure;
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -162,7 +165,7 @@ where
     pub outlet: Port<Stream<MolarFlow>, Output, P>,
 
     #[cfg(feature = "thermodynamics")]
-    pub fluid: Option<Pure>,
+    pub fluid: Option<Fluid>,
 
     _c: PhantomData<C>,
 }
@@ -232,17 +235,58 @@ impl<P: PortState> Compressor<Uninitialized, P> {
 
     #[cfg(feature = "thermodynamics")]
     /// Sets compressor configuration with gamma from thermodynamic properties.
+    ///
+    /// Automatically handles both pure components and mixtures:
+    /// - For a single component (pure): gamma calculated directly from component properties
+    /// - For mixtures: uses mole-fraction weighted mixing rules:
+    ///   - Cp_mix = sum(y_i * Cp_i)
+    ///   - Cv_mix = sum(y_i * Cv_i)
+    ///   - gamma_mix = Cp_mix / Cv_mix
+    ///
+    /// # Arguments
+    /// * `components` - Vector of Pure components (single element for pure, multiple for mixture)
+    /// * `mole_fractions` - Mole fractions for each component (must sum to 1.0)
     pub fn with_configuration_from_fluid(
         self,
         inlet_pressure: f64,
         inlet_temp: f64,
         mass_flow: f64,
         isentropic_efficiency: f64,
-        pure: Pure,
+        components: Vec<Pure>,
+        mole_fractions: Vec<f64>,
     ) -> Result<Compressor<Initialized, P>, crate::thermodynamics::ThermoError> {
-        let fluid_obj = Fluid::new(pure);
-        let props = fluid_obj.props_pt(inlet_pressure, inlet_temp)?;
-        let gamma = props.cp / props.cv;
+        if components.len() != mole_fractions.len() {
+            return Err(crate::thermodynamics::ThermoError::InvalidInput(
+                "Number of components must match number of mole fractions".to_string(),
+            ));
+        }
+
+        let sum: f64 = mole_fractions.iter().sum();
+        if (sum - 1.0).abs() > 1e-6 {
+            return Err(crate::thermodynamics::ThermoError::InvalidInput(format!(
+                "Mole fractions must sum to 1.0, got {}",
+                sum
+            )));
+        }
+
+        // Calculate mixture properties using mixing rules
+        let mut cp_mix = 0.0;
+        let mut cv_mix = 0.0;
+        let mut component_names = Vec::new();
+
+        for (i, pure) in components.iter().enumerate() {
+            let fluid = Fluid::new(*pure);
+            let props = fluid.props_pt(inlet_pressure, inlet_temp)?;
+
+            cp_mix += mole_fractions[i] * props.cp;
+            cv_mix += mole_fractions[i] * props.cv;
+            component_names.push(fluid.name.clone());
+        }
+
+        let gamma = cp_mix / cv_mix;
+
+        // For pure components, store the fluid object
+        let fluid = if components.len() == 1 { Some(Fluid::new(components[0])) } else { None };
 
         Ok(Compressor {
             outlet_pressure: self.outlet_pressure,
@@ -255,14 +299,14 @@ impl<P: PortState> Compressor<Uninitialized, P> {
             isentropic_efficiency: Some(Var::new(isentropic_efficiency)),
             gamma: Some(Var::new(gamma)),
 
-            inlet_composition: self.inlet_composition,
-            component_names: self.component_names,
+            inlet_composition: mole_fractions,
+            component_names,
 
             inlet: self.inlet,
             outlet: self.outlet,
 
             #[cfg(feature = "thermodynamics")]
-            fluid: Some(pure),
+            fluid,
 
             _c: PhantomData,
         })
@@ -329,8 +373,45 @@ impl<P: PortState> Compressor<Initialized, P> {
     }
 
     #[cfg(feature = "thermodynamics")]
-    /// Updates gamma using thermodynamic properties. Only available for fully initialized compressor.
-    pub fn update_gamma(&mut self, pure: Pure) -> Result<(), CompressorError> {
+    /// Updates gamma using thermodynamic properties.
+    /// Only available for fully initialized compressor.
+    ///
+    /// Automatically handles both pure components and mixtures based on input.
+    ///
+    /// # Arguments
+    /// * `components` - Vector of Pure components (single element for pure, multiple for mixture)
+    /// * `mole_fractions` - Mole fractions for each component (must sum to 1.0)
+    pub fn update_gamma(
+        &mut self,
+        components: Vec<Pure>,
+        mole_fractions: Vec<f64>,
+    ) -> Result<(), CompressorError> {
+        if components.len() != mole_fractions.len() {
+            return Err(CompressorError::ThermoError(
+                crate::thermodynamics::ThermoError::InvalidInput(
+                    "Number of components must match number of mole fractions".to_string(),
+                ),
+            ));
+        }
+
+        if components.is_empty() {
+            return Err(CompressorError::ThermoError(
+                crate::thermodynamics::ThermoError::InvalidInput(
+                    "At least one component must be provided".to_string(),
+                ),
+            ));
+        }
+
+        let sum: f64 = mole_fractions.iter().sum();
+        if (sum - 1.0).abs() > 1e-6 {
+            return Err(CompressorError::ThermoError(
+                crate::thermodynamics::ThermoError::InvalidInput(format!(
+                    "Mole fractions must sum to 1.0, got {}",
+                    sum
+                )),
+            ));
+        }
+
         let temp = self
             .inlet_temp
             .as_ref()
@@ -345,12 +426,31 @@ impl<P: PortState> Compressor<Initialized, P> {
                 parameter: "inlet_pressure".to_string(),
             })?
             .get();
-        let fluid_obj = Fluid::new(pure);
-        let props = fluid_obj.props_pt(pressure, temp)?;
 
-        let gamma = props.cp / props.cv;
+        // Calculate mixture properties using mixing rules
+        let mut cp_mix = 0.0;
+        let mut cv_mix = 0.0;
+
+        for (i, pure) in components.iter().enumerate() {
+            let fluid = Fluid::new(*pure);
+            let props = fluid.props_pt(pressure, temp)?;
+
+            cp_mix += mole_fractions[i] * props.cp;
+            cv_mix += mole_fractions[i] * props.cv;
+        }
+
+        let gamma = cp_mix / cv_mix;
 
         self.gamma = Some(Var::new(gamma));
+        self.inlet_composition = mole_fractions;
+
+        // Update fluid object for pure components
+        if components.len() == 1 {
+            self.fluid = Some(Fluid::new(components[0]));
+        } else {
+            self.fluid = None;
+        }
+
         Ok(())
     }
 
@@ -371,8 +471,8 @@ impl<P: PortState> Compressor<Initialized, P> {
 
         #[cfg(feature = "thermodynamics")]
         {
-            if let Some(pure) = &self.fluid {
-                let component_name = format!("{:?}", pure);
+            if let Some(fluid) = &self.fluid {
+                let component_name = fluid.name.clone();
                 let stream = Stream::pure(flow, component_name, temp, pressure);
                 return Ok(stream);
             }
@@ -597,5 +697,79 @@ mod tests {
         assert_eq!(outlet.composition, composition);
         assert_eq!(outlet.total_flow, 10.0);
         assert!(outlet.temperature > 298.15); // Should be heated by compression
+    }
+
+    #[test]
+    #[cfg(feature = "thermodynamics")]
+    fn test_compressor_with_pure_thermodynamics() {
+        use crate::models::compressor::Pure;
+
+        // Pure nitrogen
+        let comp: Result<Compressor<Initialized>, _> = Compressor::new()
+            .with_configuration_from_fluid(
+                101325.0,
+                298.15,
+                1.0,
+                0.85,
+                vec![Pure::Nitrogen],
+                vec![1.0],
+            );
+
+        assert!(comp.is_ok());
+        let comp = comp.unwrap();
+
+        let gamma = comp.gamma.as_ref().unwrap().get();
+        assert!(gamma > 1.0, "Gamma should be greater than 1.0, got {}", gamma);
+        assert!(comp.fluid.is_some(), "Pure component should have fluid object");
+    }
+
+    #[test]
+    #[cfg(feature = "thermodynamics")]
+    fn test_compressor_with_mixture_thermodynamics() {
+        use crate::models::compressor::Pure;
+
+        // Air mixture: 79% N2, 21% O2
+        let components = vec![Pure::Nitrogen, Pure::Oxygen];
+        let mole_fractions = vec![0.79, 0.21];
+
+        let comp: Result<Compressor<Initialized>, _> = Compressor::new()
+            .with_configuration_from_fluid(
+                101325.0,
+                298.15,
+                1.0,
+                0.85,
+                components,
+                mole_fractions.clone(),
+            );
+
+        assert!(comp.is_ok());
+        let comp = comp.unwrap();
+
+        // Gamma for air should be around 1.4
+        let gamma = comp.gamma.as_ref().unwrap().get();
+        assert!(gamma > 1.35 && gamma < 1.45, "Expected gamma around 1.4, got {}", gamma);
+
+        assert_eq!(comp.inlet_composition, mole_fractions);
+        assert!(comp.fluid.is_none(), "Mixture should not have single fluid object");
+    }
+
+    #[test]
+    #[cfg(feature = "thermodynamics")]
+    fn test_update_gamma() {
+        use crate::models::compressor::Pure;
+
+        let mut comp: Compressor<Initialized> =
+            Compressor::new().with_configuration(101325.0, 298.15, 1.0, 0.85, 1.4);
+
+        // Update to use thermodynamic properties for a mixture
+        let components = vec![Pure::Nitrogen, Pure::Oxygen];
+        let mole_fractions = vec![0.79, 0.21];
+
+        let result = comp.update_gamma(components, mole_fractions.clone());
+        assert!(result.is_ok());
+
+        let gamma = comp.gamma.as_ref().unwrap().get();
+        assert!(gamma > 1.35 && gamma < 1.45, "Expected gamma around around 1.4, got {}", gamma);
+        assert_eq!(comp.inlet_composition, mole_fractions);
     }
 }

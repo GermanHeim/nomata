@@ -561,7 +561,7 @@ impl FlashSeparator<Initialized, Initialized> {
     ///
     /// Returns a stream with vapor composition and conditions.
     /// Flow rate is computed as inlet_flow * vapor_fraction.
-    pub fn vapor_outlet_stream(&self) -> Stream<MolarFlow> {
+    fn compute_vapor_outlet_stream(&self) -> Result<Stream<MolarFlow>, crate::StreamError> {
         let flow = self.inlet_flow.get() * self.vapor_fraction.get();
         let temp = self.temperature.get();
         let pressure = self.pressure.get();
@@ -571,14 +571,14 @@ impl FlashSeparator<Initialized, Initialized> {
 
         #[cfg(feature = "thermodynamics")]
         {
-            if !self.component_names.is_empty() {
-                if let Ok(stream) = Stream::with_composition(
+            if !self.component_names.is_empty()
+                && let Ok(stream) = Stream::with_composition(
                     flow,
                     self.component_names.clone(),
                     composition.clone(),
-                ) {
-                    return stream.at_conditions(temp, pressure);
-                }
+                )
+            {
+                return Ok(stream.at_conditions(temp, pressure));
             }
         }
 
@@ -587,18 +587,18 @@ impl FlashSeparator<Initialized, Initialized> {
             (0..self.n_components).map(|i| format!("Component_{}", i)).collect();
 
         Stream::with_composition(flow, component_names, composition)
-            .unwrap_or_else(|_| {
-                // If composition is invalid, create a pure stream
-                Stream::new(flow, vec!["Vapor".to_string()])
+            .map(|s| s.at_conditions(temp, pressure))
+            .map_err(|_| crate::StreamError::RequiresCalculation {
+                model: "FlashSeparator (vapor)".to_string(),
+                calculation_type: "VLE calculation".to_string(),
             })
-            .at_conditions(temp, pressure)
     }
 
     /// Creates the liquid outlet stream from flash.
     ///
     /// Returns a stream with liquid composition and conditions.
     /// Flow rate is computed as inlet_flow * (1 - vapor_fraction).
-    pub fn liquid_outlet_stream(&self) -> Stream<MolarFlow> {
+    fn compute_liquid_outlet_stream(&self) -> Result<Stream<MolarFlow>, crate::StreamError> {
         let flow = self.inlet_flow.get() * (1.0 - self.vapor_fraction.get());
         let temp = self.temperature.get();
         let pressure = self.pressure.get();
@@ -608,14 +608,14 @@ impl FlashSeparator<Initialized, Initialized> {
 
         #[cfg(feature = "thermodynamics")]
         {
-            if !self.component_names.is_empty() {
-                if let Ok(stream) = Stream::with_composition(
+            if !self.component_names.is_empty()
+                && let Ok(stream) = Stream::with_composition(
                     flow,
                     self.component_names.clone(),
                     composition.clone(),
-                ) {
-                    return stream.at_conditions(temp, pressure);
-                }
+                )
+            {
+                return Ok(stream.at_conditions(temp, pressure));
             }
         }
 
@@ -624,11 +624,41 @@ impl FlashSeparator<Initialized, Initialized> {
             (0..self.n_components).map(|i| format!("Component_{}", i)).collect();
 
         Stream::with_composition(flow, component_names, composition)
-            .unwrap_or_else(|_| {
-                // If composition is invalid, create a pure stream
-                Stream::new(flow, vec!["Liquid".to_string()])
+            .map(|s| s.at_conditions(temp, pressure))
+            .map_err(|_| crate::StreamError::RequiresCalculation {
+                model: "FlashSeparator (liquid)".to_string(),
+                calculation_type: "VLE calculation".to_string(),
             })
-            .at_conditions(temp, pressure)
+    }
+
+    /// Returns a reference to the vapor outlet stream.
+    pub fn vapor_outlet_stream(&self) -> crate::OutletRef {
+        crate::OutletRef::new("FlashSeparator", "vapor")
+    }
+
+    /// Returns a reference to the liquid outlet stream.
+    pub fn liquid_outlet_stream(&self) -> crate::OutletRef {
+        crate::OutletRef::new("FlashSeparator", "liquid")
+    }
+
+    /// Populates the vapor outlet reference with the current computed stream.
+    pub fn populate_vapor_outlet(
+        &self,
+        outlet_ref: &crate::OutletRef,
+    ) -> Result<(), crate::StreamError> {
+        let stream = self.compute_vapor_outlet_stream()?;
+        outlet_ref.set(stream);
+        Ok(())
+    }
+
+    /// Populates the liquid outlet reference with the current computed stream.
+    pub fn populate_liquid_outlet(
+        &self,
+        outlet_ref: &crate::OutletRef,
+    ) -> Result<(), crate::StreamError> {
+        let stream = self.compute_liquid_outlet_stream()?;
+        outlet_ref.set(stream);
+        Ok(())
     }
 }
 
@@ -1024,8 +1054,13 @@ mod tests {
         flash.set_feed_composition(vec![0.5, 0.5]);
         flash.flash_calculation(); // Compute vapor fraction and compositions
 
-        let vapor = flash.vapor_outlet_stream();
-        let liquid = flash.liquid_outlet_stream();
+        let vapor_ref = flash.vapor_outlet_stream();
+        flash.populate_vapor_outlet(&vapor_ref).unwrap();
+        let vapor = vapor_ref.get().unwrap();
+
+        let liquid_ref = flash.liquid_outlet_stream();
+        flash.populate_liquid_outlet(&liquid_ref).unwrap();
+        let liquid = liquid_ref.get().unwrap();
 
         // Temperature and pressure match flash conditions
         assert_eq!(vapor.temperature, 350.0);

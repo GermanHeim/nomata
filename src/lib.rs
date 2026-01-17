@@ -612,6 +612,9 @@ pub struct Stream<S: StreamType, C = InitializedConditions> {
     pub temperature: f64,
     /// Pressure \[Pa\]
     pub pressure: f64,
+    /// Optional fluid object for thermodynamic calculations
+    #[cfg(feature = "thermodynamics")]
+    pub fluid: Option<crate::thermodynamics::Fluid>,
     /// Phantom data to carry the stream type
     _stream_type: PhantomData<S>,
     /// Phantom data to track condition initialization
@@ -655,6 +658,8 @@ impl<S: StreamType> Stream<S, UninitializedConditions> {
             components,
             temperature: 0.0,
             pressure: 0.0,
+            #[cfg(feature = "thermodynamics")]
+            fluid: None,
             _stream_type: PhantomData,
             _condition_state: PhantomData,
         }
@@ -694,6 +699,8 @@ impl<S: StreamType> Stream<S, UninitializedConditions> {
             components: component_vec,
             temperature: 0.0,
             pressure: 0.0,
+            #[cfg(feature = "thermodynamics")]
+            fluid: None,
             _stream_type: PhantomData,
             _condition_state: PhantomData,
         })
@@ -711,6 +718,8 @@ impl<S: StreamType> Stream<S, UninitializedConditions> {
             components: self.components,
             temperature,
             pressure,
+            #[cfg(feature = "thermodynamics")]
+            fluid: self.fluid,
             _stream_type: PhantomData,
             _condition_state: PhantomData,
         }
@@ -745,6 +754,8 @@ impl<S: StreamType> Stream<S, InitializedConditions> {
             components: vec![component],
             temperature,
             pressure,
+            #[cfg(feature = "thermodynamics")]
+            fluid: None,
             _stream_type: PhantomData,
             _condition_state: PhantomData,
         }
@@ -797,6 +808,7 @@ impl<S: StreamType> Stream<S, InitializedConditions> {
             components,
             temperature,
             pressure,
+            fluid: Some(fluid.clone()),
             _stream_type: PhantomData,
             _condition_state: PhantomData,
         }
@@ -864,10 +876,21 @@ impl<S: StreamType> Stream<S, InitializedConditions> {
         temperature: f64,
         pressure: f64,
     ) -> Self {
+        use crate::thermodynamics::Fluid;
+        use std::collections::HashMap;
+
         let component_names: Vec<String> =
             components.iter().map(|(pure, _)| format!("{:?}", pure)).collect();
 
         let composition: Vec<f64> = components.iter().map(|(_, fraction)| *fraction).collect();
+
+        // Create Fluid object
+        let fluid = if components.len() == 1 {
+            Some(Fluid::new(components[0].0))
+        } else {
+            let comp_map: HashMap<_, _> = components.into_iter().collect();
+            Fluid::new_mole_based("mixture", comp_map).ok()
+        };
 
         Stream {
             total_flow,
@@ -875,6 +898,7 @@ impl<S: StreamType> Stream<S, InitializedConditions> {
             components: component_names,
             temperature,
             pressure,
+            fluid,
             _stream_type: PhantomData,
             _condition_state: PhantomData,
         }

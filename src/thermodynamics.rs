@@ -161,6 +161,14 @@ pub enum ThermoError {
     /// Two-phase region (properties ambiguous)
     #[error("Two-phase region encountered")]
     TwoPhase,
+    /// Stream does not contain fluid information
+    #[error(
+        "Stream missing fluid information - create stream using Stream::from_fluid() or Stream::new() with Pure components"
+    )]
+    MissingFluid,
+    /// Invalid component name
+    #[error("Invalid component: {0}")]
+    InvalidComponent(String),
 }
 
 /// Substance type for thermodynamic calculations.

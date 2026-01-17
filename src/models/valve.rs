@@ -4,6 +4,19 @@ use crate::*;
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use thiserror::Error;
+
+/// Error type for valve operations.
+#[derive(Error, Debug)]
+pub enum ValveError {
+    #[error("Valve parameter not initialized: {parameter}")]
+    UninitializedParameter { parameter: String },
+    #[error("Stream error: {0}")]
+    StreamError(#[from] crate::StreamError),
+    #[cfg(feature = "thermodynamics")]
+    #[error("Thermodynamics error: {0}")]
+    ThermoError(#[from] crate::thermodynamics::ThermoError),
+}
 
 // Typed Equation Variable Structs (Generic for autodiff support)
 
@@ -85,6 +98,13 @@ where
     /// Valve opening fraction (0.0 to 1.0)
     opening: Option<Var<Parameter>>,
 
+    /// Inlet pressure for outlet stream creation
+    inlet_pressure: f64,
+
+    // Composition tracking
+    pub inlet_composition: Vec<f64>,
+    pub component_names: Vec<String>,
+
     // Ports
     /// Inlet port
     pub inlet: Port<Stream<MassFlow>, Input, P>,
@@ -102,6 +122,9 @@ impl Valve {
             flow: Var::new(0.0),
             cv: None,
             opening: None,
+            inlet_pressure: 101325.0,
+            inlet_composition: vec![1.0],
+            component_names: vec!["Unknown".to_string()],
             inlet: Port::new(),
             outlet: Port::new(),
             _config: PhantomData,
@@ -136,6 +159,9 @@ impl<P: PortState> Valve<Uninitialized, P> {
             flow: self.flow,
             cv: Some(Var::new(cv)),
             opening: Some(Var::new(opening)),
+            inlet_pressure: self.inlet_pressure,
+            inlet_composition: self.inlet_composition,
+            component_names: self.component_names,
             inlet: self.inlet,
             outlet: self.outlet,
             _config: PhantomData,
@@ -179,6 +205,64 @@ impl<P: PortState> Valve<Initialized, P> {
         // F = Cv * opening * sqrt(dP)
         let flow = cv * opening * pressure_drop.abs().sqrt();
         self.flow = Var::new(flow);
+    }
+
+    /// Computes the outlet stream after valve pressure drop (internal use).
+    ///
+    /// For flowsheet building, use `outlet_stream()` which returns a reference.
+    /// This method is called internally by the solver.
+    pub fn compute_outlet_stream(&self) -> Result<Stream<MassFlow>, ValveError> {
+        let flow = self.flow.get();
+        let outlet_pressure = self.inlet_pressure - self.pressure_drop.get();
+
+        // If we have multicomponent composition info, use it
+        if !self.component_names.is_empty()
+            && self.component_names[0] != "Unknown"
+            && let Ok(stream) = Stream::with_composition(
+                flow,
+                self.component_names.clone(),
+                self.inlet_composition.clone(),
+            )
+        {
+            return Ok(stream.at_conditions(298.15, outlet_pressure));
+        }
+
+        Err(ValveError::StreamError(crate::StreamError::MissingComposition {
+            model: "Valve".to_string(),
+            suggestion: "set_composition() or FromStream trait".to_string(),
+        }))
+    }
+
+    /// Returns a reference to the outlet stream.
+    pub fn outlet_stream(&self) -> crate::OutletRef<crate::MassFlow> {
+        crate::OutletRef::new("Valve", "outlet")
+    }
+
+    /// Populates the outlet reference with the current computed stream.
+    pub fn populate_outlet(
+        &self,
+        outlet_ref: &crate::OutletRef<crate::MassFlow>,
+    ) -> Result<(), ValveError> {
+        let stream = self.compute_outlet_stream()?;
+        outlet_ref.set(stream);
+        Ok(())
+    }
+}
+
+impl crate::FromStream for Valve<Initialized> {
+    fn from_stream<S: crate::StreamType, C>(stream: &crate::Stream<S, C>) -> Self {
+        Valve {
+            pressure_drop: Var::new(10000.0),
+            flow: Var::new(stream.total_flow),
+            cv: Some(Var::new(1.0)),
+            opening: Some(Var::new(0.5)),
+            inlet_pressure: stream.pressure,
+            inlet_composition: stream.composition.clone(),
+            component_names: stream.components.clone(),
+            inlet: Port::new(),
+            outlet: Port::new(),
+            _config: PhantomData,
+        }
     }
 }
 

@@ -234,6 +234,53 @@ impl<P: PortState> Compressor<Uninitialized, P> {
     }
 
     #[cfg(feature = "thermodynamics")]
+    /// Initializes compressor from a stream with embedded fluid information.
+    ///
+    /// Extracts flow rate, temperature, pressure, and composition from the stream,
+    /// then calculates thermodynamic properties (gamma, density) from the embedded fluid.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use nomata::{Stream, MassFlow, models::Compressor};
+    /// use nomata::thermodynamics::Fluid;
+    /// use rfluids::prelude::Pure;
+    ///
+    /// let fluid = Fluid::new(Pure::Nitrogen);
+    /// let stream = Stream::<MassFlow>::from_fluid(10.0, &fluid, 300.0, 101325.0);
+    /// let compressor = Compressor::new(2.5, 0.85)
+    ///     .with_stream(&stream).unwrap();
+    /// ```
+    pub fn with_stream<S: crate::StreamType, C>(
+        self,
+        stream: &crate::Stream<S, C>,
+    ) -> Result<Compressor<Initialized, P>, crate::thermodynamics::ThermoError> {
+        let fluid =
+            stream.fluid.as_ref().ok_or(crate::thermodynamics::ThermoError::MissingFluid)?;
+
+        // Calculate properties at stream conditions
+        let props = fluid.props_pt(stream.pressure, stream.temperature)?;
+        let gamma = props.cp / props.cv;
+
+        Ok(Compressor {
+            outlet_pressure: self.outlet_pressure,
+            outlet_temp: self.outlet_temp,
+            power: self.power,
+            inlet_pressure: Some(Var::new(stream.pressure)),
+            inlet_temp: Some(Var::new(stream.temperature)),
+            mass_flow: Some(Var::new(stream.total_flow)),
+            isentropic_efficiency: self.isentropic_efficiency,
+            gamma: Some(Var::new(gamma)),
+            inlet_composition: stream.composition.clone(),
+            component_names: stream.components.clone(),
+            inlet: self.inlet,
+            outlet: self.outlet,
+            fluid: Some(fluid.clone()),
+            _c: PhantomData,
+        })
+    }
+
+    #[cfg(feature = "thermodynamics")]
     /// Sets compressor configuration with gamma from thermodynamic properties.
     ///
     /// Automatically handles both pure components and mixtures:
@@ -285,8 +332,17 @@ impl<P: PortState> Compressor<Uninitialized, P> {
 
         let gamma = cp_mix / cv_mix;
 
-        // For pure components, store the fluid object
-        let fluid = if components.len() == 1 { Some(Fluid::new(components[0])) } else { None };
+        // Create fluid object for both pure and mixtures
+        let fluid = if components.len() == 1 {
+            Some(Fluid::new(components[0]))
+        } else {
+            // Create mixture using new_mole_based
+            let mut composition = std::collections::HashMap::new();
+            for (i, pure) in components.iter().enumerate() {
+                composition.insert(*pure, mole_fractions[i]);
+            }
+            Some(Fluid::new_mole_based("Mixture", composition)?)
+        };
 
         Ok(Compressor {
             outlet_pressure: self.outlet_pressure,
@@ -442,13 +498,32 @@ impl<P: PortState> Compressor<Initialized, P> {
         let gamma = cp_mix / cv_mix;
 
         self.gamma = Some(Var::new(gamma));
-        self.inlet_composition = mole_fractions;
+        self.inlet_composition = mole_fractions.clone();
 
-        // Update fluid object for pure components
+        // Create fluid object for both pure and mixture cases
         if components.len() == 1 {
             self.fluid = Some(Fluid::new(components[0]));
+            self.component_names = vec![format!("{:?}", components[0])];
         } else {
-            self.fluid = None;
+            // Store component names before creating HashMap
+            let comp_names: Vec<String> = components.iter().map(|p| format!("{:?}", p)).collect();
+
+            // Create mixture fluid
+            use std::collections::HashMap;
+            let component_map: HashMap<Pure, f64> =
+                components.into_iter().zip(mole_fractions).collect();
+
+            match Fluid::new_mole_based("Mixture", component_map) {
+                Ok(mixture) => {
+                    let (names, _) = mixture.get_components();
+                    self.component_names = names;
+                    self.fluid = Some(mixture);
+                }
+                Err(_) => {
+                    self.fluid = None;
+                    self.component_names = comp_names;
+                }
+            }
         }
 
         Ok(())
@@ -472,9 +547,24 @@ impl<P: PortState> Compressor<Initialized, P> {
         #[cfg(feature = "thermodynamics")]
         {
             if let Some(fluid) = &self.fluid {
-                let component_name = fluid.name.clone();
-                let stream = Stream::pure(flow, component_name, temp, pressure);
-                return Ok(stream);
+                // Use Fluid::get_components() to get component info
+                let (component_names, composition) = fluid.get_components();
+
+                if component_names.len() == 1 && (composition[0] - 1.0).abs() < 1e-6 {
+                    // Pure component - use simpler API
+                    let stream = Stream::pure(flow, component_names[0].clone(), temp, pressure);
+                    return Ok(stream);
+                } else {
+                    // Mixture - use composition API
+                    let stream = Stream::with_composition(flow, component_names, composition)
+                        .map_err(|e| {
+                            CompressorError::StreamError(crate::StreamError::MissingComposition {
+                                model: "Compressor".to_string(),
+                                suggestion: format!("Failed to create stream: {}", e),
+                            })
+                        })?;
+                    return Ok(stream.at_conditions(temp, pressure));
+                }
             }
         }
 
@@ -750,7 +840,19 @@ mod tests {
         assert!(gamma > 1.35 && gamma < 1.45, "Expected gamma around 1.4, got {}", gamma);
 
         assert_eq!(comp.inlet_composition, mole_fractions);
-        assert!(comp.fluid.is_none(), "Mixture should not have single fluid object");
+
+        // Should now have a mixture Fluid object
+        assert!(comp.fluid.is_some(), "Mixture should have Fluid object");
+        let (component_names, composition) = comp.fluid.as_ref().unwrap().get_components();
+
+        // Verify we have the right components (order may vary due to HashMap)
+        assert_eq!(component_names.len(), 2);
+        assert!(component_names.contains(&"Nitrogen".to_string()));
+        assert!(component_names.contains(&"Oxygen".to_string()));
+
+        // Verify composition sums to 1.0
+        let sum: f64 = composition.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-6, "Composition should sum to 1.0");
     }
 
     #[test]

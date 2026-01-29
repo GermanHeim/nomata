@@ -205,6 +205,50 @@ impl<P: PortState> Pump<Uninitialized, P> {
     }
 
     #[cfg(feature = "thermodynamics")]
+    /// Initializes pump from a stream with embedded fluid information.
+    ///
+    /// Extracts flow rate, temperature, pressure, and composition from the stream,
+    /// then calculates density from the embedded fluid.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use nomata::{Stream, MolarFlow, models::Pump};
+    /// use nomata::thermodynamics::Fluid;
+    /// use rfluids::prelude::Pure;
+    ///
+    /// let fluid = Fluid::new(Pure::Water);
+    /// let stream = Stream::<MolarFlow>::from_fluid(100.0, &fluid, 298.15, 101325.0);
+    /// let pump = Pump::new(200000.0, 0.75)
+    ///     .with_stream(&stream).unwrap();
+    /// ```
+    pub fn with_stream<S: crate::StreamType, C>(
+        self,
+        stream: &crate::Stream<S, C>,
+    ) -> Result<Pump<Initialized, P>, crate::thermodynamics::ThermoError> {
+        let fluid =
+            stream.fluid.as_ref().ok_or(crate::thermodynamics::ThermoError::MissingFluid)?;
+
+        let props = fluid.props_pt(stream.pressure, stream.temperature)?;
+
+        Ok(Pump {
+            outlet_pressure: self.outlet_pressure,
+            power: self.power,
+            inlet_pressure: Some(Var::new(stream.pressure)),
+            volumetric_flow: Some(Var::new(stream.total_flow / props.density)),
+            efficiency: self.efficiency,
+            density: Some(Var::new(props.density)),
+            head: self.head,
+            inlet_composition: stream.composition.clone(),
+            component_names: stream.components.clone(),
+            inlet: self.inlet,
+            outlet: self.outlet,
+            fluid: Some(fluid.clone()),
+            _c: PhantomData,
+        })
+    }
+
+    #[cfg(feature = "thermodynamics")]
     /// Sets pump configuration with density from thermodynamic properties.
     ///
     /// Automatically handles both pure components and mixtures:

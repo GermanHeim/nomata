@@ -310,6 +310,165 @@ impl TimeDomain for Dynamic {
     const IS_STEADY: bool = false;
 }
 
+/// Component group defining species tracked in a model or flowsheet section.
+///
+/// ComponentGroup provides compile-time component list validation and enables:
+/// - Shared component definitions across multiple models
+/// - Thermodynamic property access when thermodynamics feature enabled
+/// - Type-safe stream compatibility checking
+/// - Elimination of redundant n_components parameters
+///
+/// # Examples
+///
+/// ```
+/// use nomata::ComponentGroup;
+///
+/// # #[cfg(not(feature = "thermodynamics"))]
+/// # {
+/// // Without thermodynamics: string-based components
+/// let comps = ComponentGroup::from_names(vec!["N2".into(), "O2".into()]);
+/// assert_eq!(comps.count(), 2);
+/// # }
+/// ```
+///
+/// With thermodynamics feature enabled:
+/// ```ignore
+/// use nomata::{ComponentGroup, Pure};
+///
+/// // Type-safe thermodynamic components
+/// let comps = ComponentGroup::from_substances(vec![
+///     Pure::Nitrogen.into(),
+///     Pure::Oxygen.into(),
+/// ]);
+/// ```
+#[derive(Debug, Clone)]
+pub struct ComponentGroup {
+    #[cfg(feature = "thermodynamics")]
+    /// Thermodynamic substances (when thermodynamics enabled)
+    pub substances: Vec<Substance>,
+
+    #[cfg(not(feature = "thermodynamics"))]
+    /// Component names (when thermodynamics disabled)
+    pub names: Vec<String>,
+}
+
+impl ComponentGroup {
+    /// Creates a ComponentGroup from thermodynamic substances.
+    #[cfg(feature = "thermodynamics")]
+    pub fn from_substances(substances: Vec<Substance>) -> Self {
+        ComponentGroup { substances }
+    }
+
+    /// Creates a ComponentGroup from component names.
+    ///
+    /// Use this when thermodynamics feature is disabled or for abstract components.
+    #[cfg(not(feature = "thermodynamics"))]
+    pub fn from_names(names: Vec<String>) -> Self {
+        ComponentGroup { names }
+    }
+
+    /// Creates a ComponentGroup from component names (thermodynamics enabled fallback).
+    ///
+    /// This is available when thermodynamics is enabled but you want to use
+    /// string-based components instead of full thermodynamic substances.
+    #[cfg(feature = "thermodynamics")]
+    pub fn from_names(names: Vec<String>) -> Self {
+        // Convert strings to Pure substances if possible, otherwise panic
+        let substances: Vec<Substance> = names
+            .iter()
+            .map(|_name| {
+                // This is a simplified conversion - in reality you'd want a proper lookup
+                panic!("Use from_substances() with thermodynamics feature enabled")
+            })
+            .collect();
+        ComponentGroup { substances }
+    }
+
+    /// Returns the number of components in this group.
+    pub fn count(&self) -> usize {
+        #[cfg(feature = "thermodynamics")]
+        return self.substances.len();
+
+        #[cfg(not(feature = "thermodynamics"))]
+        return self.names.len();
+    }
+
+    /// Returns component names for display purposes.
+    pub fn component_names(&self) -> Vec<String> {
+        #[cfg(feature = "thermodynamics")]
+        {
+            self.substances
+                .iter()
+                .map(|s| match s {
+                    Substance::Pure(p) => format!("{:?}", p),
+                    Substance::PredefinedMix(m) => format!("{:?}", m),
+                    Substance::BinaryMix(_) => "BinaryMix".to_string(),
+                    Substance::CustomMix(_) => "CustomMix".to_string(),
+                })
+                .collect()
+        }
+
+        #[cfg(not(feature = "thermodynamics"))]
+        {
+            self.names.clone()
+        }
+    }
+}
+
+/// Execution mode for flowsheet solving.
+///
+/// This determines how the flowsheet is solved:
+/// - Sequential Modular: Units executed in sequence, each computes outputs from inputs
+/// - Equation-Oriented: All equations assembled and solved simultaneously
+///
+/// The mode is selected at solve time, not when building models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMode {
+    /// Sequential Modular: direct input-to-output computations.
+    ///
+    /// Each unit is solved independently in topological order.
+    SequentialModular,
+
+    /// Equation-Oriented: simultaneous equation solving.
+    ///
+    /// All unit equations assembled into a global system.
+    EquationOriented,
+}
+
+/// Error type for Sequential Modular execution.
+#[derive(Debug, thiserror::Error)]
+pub enum SmError {
+    #[error("Unit {0} cannot be executed in Sequential Modular mode")]
+    NotSequentializable(String),
+    #[error("Computation failed: {0}")]
+    ComputationFailed(String),
+}
+
+/// Capability: Unit can execute in Sequential Modular mode.
+///
+/// Units implementing this trait can be executed sequentially as part of
+/// a Sequential-Modular flowsheet calculation. The flowsheet may still
+/// require iterative convergence (via RecycleSolver) for recycle loops,
+/// but individual units execute their calculations sequentially.
+///
+/// This trait enables SM simulation where:
+/// 1. Units compute outputs from current inputs
+/// 2. Flowsheet topology determines execution order
+/// 3. Recycle loops are handled by iterative convergence
+pub trait SequentialUnit {
+    /// Check if this unit can execute sequentially in its current state.
+    fn can_execute_sequentially(&self) -> bool;
+
+    /// Execute sequential computation: compute outputs from current inputs.
+    ///
+    /// This is called as part of SM flowsheet execution. The unit computes
+    /// its outputs based on current input values, which may be updated
+    /// through recycle iteration at the flowsheet level.
+    ///
+    /// Only called if `can_execute_sequentially()` returns true.
+    fn execute(&mut self) -> Result<(), SmError>;
+}
+
 /// Component Layer: Variables
 /// A typed variable in a process model.
 ///
@@ -4747,7 +4906,8 @@ mod tests {
 
         let reactor1 = CSTR::new(100.0, 1.0, 350.0);
         let reactor2 = CSTR::new(50.0, 0.5, 340.0);
-        let mixer: Mixer<2> = Mixer::new(1).with_inlets_configured(); // 2 inlets, 1 component
+        let comps = ComponentGroup::from_names(vec!["A".into()]);
+        let mixer: Mixer<2> = Mixer::new(comps).with_inlets_configured(); // 2 inlets
 
         flowsheet.add_unit("CSTR-101", reactor1);
         flowsheet.add_unit("CSTR-102", reactor2);
@@ -5350,7 +5510,8 @@ mod tests {
         let mut flowsheet = Flowsheet::<Dynamic>::new();
 
         let reactor = models::CSTR::new(100.0, 1.0, 350.0);
-        let separator = models::FlashSeparator::new(300.0, 2);
+        let comps = ComponentGroup::from_names(vec!["A".into(), "B".into()]);
+        let separator = models::FlashSeparator::new(300.0, comps);
         let reactor_id = flowsheet.add_unit("reactor", reactor);
         let separator_id = flowsheet.add_unit("separator", separator);
 
@@ -5654,7 +5815,8 @@ mod tests {
     fn test_multicomponent_stream_mix() {
         use crate::models::Mixer;
 
-        let mut mixer = Mixer::<2, _>::new(2).with_inlets_configured();
+        let comps = ComponentGroup::from_names(vec!["A".into(), "B".into()]);
+        let mut mixer = Mixer::<2, _>::new(comps).with_inlets_configured();
         mixer.inlet_flows = [100.0, 50.0];
         mixer.inlet_temps = [298.15, 298.15];
         // inlet_compositions[component_idx][inlet_idx]

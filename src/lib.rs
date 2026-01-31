@@ -367,23 +367,6 @@ impl ComponentGroup {
         ComponentGroup { names }
     }
 
-    /// Creates a ComponentGroup from component names (thermodynamics enabled fallback).
-    ///
-    /// This is available when thermodynamics is enabled but you want to use
-    /// string-based components instead of full thermodynamic substances.
-    #[cfg(feature = "thermodynamics")]
-    pub fn from_names(names: Vec<String>) -> Self {
-        // Convert strings to Pure substances if possible, otherwise panic
-        let substances: Vec<Substance> = names
-            .iter()
-            .map(|_name| {
-                // This is a simplified conversion - in reality you'd want a proper lookup
-                panic!("Use from_substances() with thermodynamics feature enabled")
-            })
-            .collect();
-        ComponentGroup { substances }
-    }
-
     /// Returns the number of components in this group.
     pub fn count(&self) -> usize {
         #[cfg(feature = "thermodynamics")]
@@ -4906,7 +4889,15 @@ mod tests {
 
         let reactor1 = CSTR::new(100.0, 1.0, 350.0);
         let reactor2 = CSTR::new(50.0, 0.5, 340.0);
+        #[cfg(not(feature = "thermodynamics"))]
         let comps = ComponentGroup::from_names(vec!["A".into()]);
+        #[cfg(feature = "thermodynamics")]
+        let comps = {
+            use crate::thermodynamics::{Substance, fluids::Pure};
+            ComponentGroup::from_substances(vec![
+                Substance::Pure(Pure::Water),
+            ])
+        };
         let mixer: Mixer<2> = Mixer::new(comps).with_inlets_configured(); // 2 inlets
 
         flowsheet.add_unit("CSTR-101", reactor1);
@@ -5510,7 +5501,16 @@ mod tests {
         let mut flowsheet = Flowsheet::<Dynamic>::new();
 
         let reactor = models::CSTR::new(100.0, 1.0, 350.0);
+        #[cfg(not(feature = "thermodynamics"))]
         let comps = ComponentGroup::from_names(vec!["A".into(), "B".into()]);
+        #[cfg(feature = "thermodynamics")]
+        let comps = {
+            use crate::thermodynamics::{Substance, fluids::Pure};
+            ComponentGroup::from_substances(vec![
+                Substance::Pure(Pure::Water),
+                Substance::Pure(Pure::Ethanol),
+            ])
+        };
         let separator = models::FlashSeparator::new(300.0, comps);
         let reactor_id = flowsheet.add_unit("reactor", reactor);
         let separator_id = flowsheet.add_unit("separator", separator);
@@ -5815,7 +5815,16 @@ mod tests {
     fn test_multicomponent_stream_mix() {
         use crate::models::Mixer;
 
+        #[cfg(not(feature = "thermodynamics"))]
         let comps = ComponentGroup::from_names(vec!["A".into(), "B".into()]);
+        #[cfg(feature = "thermodynamics")]
+        let comps = {
+            use crate::thermodynamics::{Substance, fluids::Pure};
+            ComponentGroup::from_substances(vec![
+                Substance::Pure(Pure::Water),
+                Substance::Pure(Pure::Ethanol),
+            ])
+        };
         let mut mixer = Mixer::<2, _>::new(comps).with_inlets_configured();
         mixer.inlet_flows = [100.0, 50.0];
         mixer.inlet_temps = [298.15, 298.15];

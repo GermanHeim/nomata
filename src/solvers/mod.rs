@@ -72,9 +72,11 @@
 //! ```
 
 // Submodules
-pub mod integration;
 pub mod recycle;
 
+use crate::EquationModel;
+#[cfg(feature = "autodiff")]
+use crate::autodiff::compute_jacobian;
 use nalgebra::{DMatrix, DVector};
 
 /// Result type for solver operations.
@@ -98,21 +100,12 @@ pub enum SolverError {
     /// Invalid initial conditions
     #[error("Invalid initial conditions")]
     InvalidInitialConditions,
-    /// ODE solver failed
-    #[error("ODE solver failed: {0}")]
-    ODESolverFailed(String),
-    /// ODE/DAE solver feature not enabled
-    #[error("ODE/DAE solver requires the 'solvers' feature to be enabled")]
-    FeatureNotEnabled,
     /// No variables to solve in the equation system
     #[error("No variables to solve. Did you forget to call harvest_equations()?")]
     NoVariablesToSolve,
-    /// No differential equations to integrate
-    #[error("No differential equations to integrate")]
+    /// No equations in the system
+    #[error("No equations to solve")]
     NoEquations,
-    /// Too many differential variables for integrator capacity
-    #[error("Problem has {0} differential variables but integrator capacity is {1}")]
-    TooManyDifferentialVariables(usize, usize),
     /// Invalid tear stream configuration
     #[error("Invalid tear stream: {0}")]
     InvalidTearStream(String),
@@ -264,24 +257,6 @@ impl NewtonRaphson {
     }
 }
 
-/// Configuration for DAE solvers.
-pub struct DAESolverConfig {
-    /// Absolute tolerance
-    pub atol: f64,
-    /// Relative tolerance
-    pub rtol: f64,
-    /// Maximum step size
-    pub max_step: f64,
-    /// Initial step size
-    pub initial_step: f64,
-}
-
-impl Default for DAESolverConfig {
-    fn default() -> Self {
-        DAESolverConfig { atol: 1e-6, rtol: 1e-6, max_step: 0.1, initial_step: 0.01 }
-    }
-}
-
 /// Statistics from a solver run.
 #[derive(Debug, Clone)]
 pub struct SolverStats {
@@ -306,610 +281,6 @@ impl Default for SolverStats {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// High-level flowsheet solver.
-///
-/// Integrates a dynamic flowsheet over time by solving the underlying DAE system.
-/// Requires the `solvers` feature to be enabled.
-///
-/// ODE solver with user-provided Jacobian function.
-pub fn solve_ode_with_jacobian<const N: usize, F, J>(
-    f: F,
-    jacobian: J,
-    y0: Vec<f64>,
-    t_span: (f64, f64),
-    method: integration::IntegrationMethod,
-) -> SolverResult<Vec<(f64, Vec<f64>)>>
-where
-    F: Fn(f64, &[f64]) -> Vec<f64>,
-    J: Fn(f64, &[f64]) -> Vec<Vec<f64>>,
-{
-    #[cfg(feature = "solvers")]
-    {
-        use differential_equations::{
-            methods::{ExplicitRungeKutta, ImplicitRungeKutta},
-            ode::{ODE, ODEProblem},
-        };
-        use nalgebra::SVector;
-
-        // Create ODE wrapper
-        struct UserODE<F, J> {
-            f: F,
-            jacobian: J,
-            n: usize,
-        }
-
-        impl<const M: usize, F, J> ODE<f64, SVector<f64, M>> for UserODE<F, J>
-        where
-            F: Fn(f64, &[f64]) -> Vec<f64>,
-            J: Fn(f64, &[f64]) -> Vec<Vec<f64>>,
-        {
-            fn diff(&self, t: f64, y: &SVector<f64, M>, dydt: &mut SVector<f64, M>) {
-                let y_slice = &y.as_slice()[..self.n];
-                let result = (self.f)(t, y_slice);
-                for i in 0..self.n {
-                    dydt[i] = result[i];
-                }
-            }
-
-            fn jacobian(
-                &self,
-                t: f64,
-                y: &SVector<f64, M>,
-                dfdy: &mut differential_equations::prelude::Matrix<f64>,
-            ) {
-                let y_slice = y.as_slice();
-                let jac = (self.jacobian)(t, &y_slice[..self.n]);
-                for i in 0..self.n {
-                    for j in 0..self.n {
-                        dfdy[(i, j)] = jac[i][j];
-                    }
-                }
-            }
-        }
-
-        let n = y0.len();
-        if n != N {
-            return Err(SolverError::InvalidInitialConditions);
-        }
-
-        let mut y0_svector = SVector::<f64, N>::zeros();
-        for i in 0..n {
-            y0_svector[i] = y0[i];
-        }
-
-        let ode = UserODE { f, jacobian, n };
-        let problem = ODEProblem::new(&ode, t_span.0, t_span.1, y0_svector);
-
-        match method {
-            integration::IntegrationMethod::RK4 => {
-                let mut solver = ExplicitRungeKutta::rk4(0.01);
-                match problem.solve(&mut solver) {
-                    Ok(solution) => {
-                        let mut result = Vec::new();
-                        for i in 0..solution.t.len() {
-                            let t = solution.t[i];
-                            let y_vec = (0..n).map(|j| solution.y[i][j]).collect();
-                            result.push((t, y_vec));
-                        }
-                        Ok(result)
-                    }
-                    Err(e) => Err(SolverError::ODESolverFailed(e.to_string())),
-                }
-            }
-            integration::IntegrationMethod::Dopri5 => {
-                let mut solver = ExplicitRungeKutta::dopri5();
-                match problem.solve(&mut solver) {
-                    Ok(solution) => {
-                        let mut result = Vec::new();
-                        for i in 0..solution.t.len() {
-                            let t = solution.t[i];
-                            let y_vec = (0..n).map(|j| solution.y[i][j]).collect();
-                            result.push((t, y_vec));
-                        }
-                        Ok(result)
-                    }
-                    Err(e) => Err(SolverError::ODESolverFailed(e.to_string())),
-                }
-            }
-            integration::IntegrationMethod::Euler => {
-                let mut solver = ExplicitRungeKutta::euler(0.01);
-                match problem.solve(&mut solver) {
-                    Ok(solution) => {
-                        let mut result = Vec::new();
-                        for i in 0..solution.t.len() {
-                            let t = solution.t[i];
-                            let y_vec = (0..n).map(|j| solution.y[i][j]).collect();
-                            result.push((t, y_vec));
-                        }
-                        Ok(result)
-                    }
-                    Err(e) => Err(SolverError::ODESolverFailed(e.to_string())),
-                }
-            }
-            integration::IntegrationMethod::Radau5 => {
-                let mut solver = ImplicitRungeKutta::radau5();
-                match problem.solve(&mut solver) {
-                    Ok(solution) => {
-                        let mut result = Vec::new();
-                        for i in 0..solution.t.len() {
-                            let t = solution.t[i];
-                            let y_vec = (0..n).map(|j| solution.y[i][j]).collect();
-                            result.push((t, y_vec));
-                        }
-                        Ok(result)
-                    }
-                    Err(e) => Err(SolverError::ODESolverFailed(e.to_string())),
-                }
-            }
-            integration::IntegrationMethod::GaussLegendre4 => {
-                let mut solver = ImplicitRungeKutta::gauss_legendre_4();
-                match problem.solve(&mut solver) {
-                    Ok(solution) => {
-                        let mut result = Vec::new();
-                        for i in 0..solution.t.len() {
-                            let t = solution.t[i];
-                            let y_vec = (0..n).map(|j| solution.y[i][j]).collect();
-                            result.push((t, y_vec));
-                        }
-                        Ok(result)
-                    }
-                    Err(e) => Err(SolverError::ODESolverFailed(e.to_string())),
-                }
-            }
-            integration::IntegrationMethod::GaussLegendre6 => {
-                let mut solver = ImplicitRungeKutta::gauss_legendre_6();
-                match problem.solve(&mut solver) {
-                    Ok(solution) => {
-                        let mut result = Vec::new();
-                        for i in 0..solution.t.len() {
-                            let t = solution.t[i];
-                            let y_vec = (0..n).map(|j| solution.y[i][j]).collect();
-                            result.push((t, y_vec));
-                        }
-                        Ok(result)
-                    }
-                    Err(e) => Err(SolverError::ODESolverFailed(e.to_string())),
-                }
-            }
-            integration::IntegrationMethod::LobattoIIIC2 => {
-                let mut solver = ImplicitRungeKutta::lobatto_iiic_2();
-                match problem.solve(&mut solver) {
-                    Ok(solution) => {
-                        let mut result = Vec::new();
-                        for i in 0..solution.t.len() {
-                            let t = solution.t[i];
-                            let y_vec = (0..n).map(|j| solution.y[i][j]).collect();
-                            result.push((t, y_vec));
-                        }
-                        Ok(result)
-                    }
-                    Err(e) => Err(SolverError::ODESolverFailed(e.to_string())),
-                }
-            }
-            integration::IntegrationMethod::LobattoIIIC4 => {
-                let mut solver = ImplicitRungeKutta::lobatto_iiic_4();
-                match problem.solve(&mut solver) {
-                    Ok(solution) => {
-                        let mut result = Vec::new();
-                        for i in 0..solution.t.len() {
-                            let t = solution.t[i];
-                            let y_vec = (0..n).map(|j| solution.y[i][j]).collect();
-                            result.push((t, y_vec));
-                        }
-                        Ok(result)
-                    }
-                    Err(e) => Err(SolverError::ODESolverFailed(e.to_string())),
-                }
-            }
-            // Fixed-step explicit methods
-            integration::IntegrationMethod::Heun => {
-                let mut solver = ExplicitRungeKutta::heun(0.01);
-                match problem.solve(&mut solver) {
-                    Ok(solution) => {
-                        let mut result = Vec::new();
-                        for i in 0..solution.t.len() {
-                            let t = solution.t[i];
-                            let y_vec = (0..n).map(|j| solution.y[i][j]).collect();
-                            result.push((t, y_vec));
-                        }
-                        Ok(result)
-                    }
-                    Err(e) => Err(SolverError::ODESolverFailed(e.to_string())),
-                }
-            }
-            integration::IntegrationMethod::Midpoint => {
-                let mut solver = ExplicitRungeKutta::midpoint(0.01);
-                match problem.solve(&mut solver) {
-                    Ok(solution) => {
-                        let mut result = Vec::new();
-                        for i in 0..solution.t.len() {
-                            let t = solution.t[i];
-                            let y_vec = (0..n).map(|j| solution.y[i][j]).collect();
-                            result.push((t, y_vec));
-                        }
-                        Ok(result)
-                    }
-                    Err(e) => Err(SolverError::ODESolverFailed(e.to_string())),
-                }
-            }
-            integration::IntegrationMethod::Ralston => {
-                let mut solver = ExplicitRungeKutta::ralston(0.01);
-                match problem.solve(&mut solver) {
-                    Ok(solution) => {
-                        let mut result = Vec::new();
-                        for i in 0..solution.t.len() {
-                            let t = solution.t[i];
-                            let y_vec = (0..n).map(|j| solution.y[i][j]).collect();
-                            result.push((t, y_vec));
-                        }
-                        Ok(result)
-                    }
-                    Err(e) => Err(SolverError::ODESolverFailed(e.to_string())),
-                }
-            }
-        }
-    }
-
-    #[cfg(not(feature = "solvers"))]
-    {
-        Err(SolverError::FeatureNotEnabled)
-    }
-}
-
-/// Solves a steady-state flowsheet (algebraic equations only).
-///
-/// # Example
-///
-/// ```ignore
-/// use nomata::{Flowsheet, Steady, VariableRegistry, solvers::solve_steady_state};
-///
-/// let mut flowsheet = Flowsheet::<Steady>::new();
-/// let registry = VariableRegistry::new();
-///
-/// // ... build flowsheet, harvest equations ...
-///
-/// let solution = solve_steady_state(&flowsheet, &registry)?;
-/// ```
-pub fn solve_steady_state<T: crate::TimeDomain>(
-    flowsheet: &crate::Flowsheet<T>,
-    registry: &crate::VariableRegistry,
-) -> SolverResult<Vec<f64>> {
-    let equations = flowsheet.equations();
-    let initial_guess = registry.get_all_values();
-
-    // Define combined residual and Jacobian function
-    let f = |x: &[f64]| -> (Vec<f64>, Vec<Vec<f64>>) {
-        let derivatives = vec![0.0; x.len()];
-        let residuals = equations.evaluate_residuals(x, &derivatives, 0.0);
-        let jacobian = equations.compute_jacobian(x);
-        (residuals, jacobian)
-    };
-
-    // Solve using Newton-Raphson
-    let solver = NewtonRaphson::new(1e-6, 100);
-    solver.solve(f, &initial_guess)
-}
-
-/// Unified flowsheet solution that can represent different solver results.
-#[derive(Debug, Clone)]
-pub enum FlowsheetSolution {
-    /// Solution from steady-state solver (no recycle loops)
-    SteadyState {
-        /// Converged variable values
-        values: Vec<f64>,
-        /// Solver statistics
-        stats: SolverStats,
-    },
-    /// Solution from recycle solver (with recycle loops)
-    Recycle {
-        /// Converged tear stream values
-        tear_values: Vec<f64>,
-        /// Solver statistics
-        stats: SolverStats,
-    },
-}
-
-/// Unified solver API for flowsheets.
-///
-/// Automatically detects flowsheet topology and chooses the appropriate solver:
-/// - **Acyclic flowsheets**: Uses steady-state Newton-Raphson solver
-/// - **Cyclic flowsheets**: Uses recycle/tear-stream solver (future extension)
-///
-/// # Example
-///
-/// ```ignore
-/// use nomata::{Flowsheet, Steady, solvers::solve};
-///
-/// let mut flowsheet = Flowsheet::<Steady>::new();
-/// // ... build flowsheet and harvest equations ...
-///
-/// let solution = solve(&flowsheet)?;
-///
-/// match solution {
-///     FlowsheetSolution::SteadyState { values, stats } => {
-///         println!("Solved in {} iterations", stats.iterations);
-///         // Use values...
-///     }
-///     FlowsheetSolution::Recycle { tear_values, stats } => {
-///         // Handle recycle case...
-///     }
-/// }
-/// ```
-/// Configuration for the unified solver.
-///
-/// Allows users to customize solver behavior for both acyclic and cyclic flowsheets.
-#[derive(Debug, Clone)]
-pub struct SolverConfig {
-    /// Solution method for recycle convergence
-    pub recycle_method: recycle::SolverMethod,
-    /// Maximum iterations for solvers
-    pub max_iterations: usize,
-    /// Convergence tolerance
-    pub tolerance: f64,
-    /// Damping factor for fixed-point iterations (0.0 to 1.0)
-    pub damping: f64,
-    /// Whether to try fallback methods on failure
-    pub enable_fallback: bool,
-}
-
-impl Default for SolverConfig {
-    fn default() -> Self {
-        SolverConfig {
-            recycle_method: recycle::SolverMethod::Wegstein,
-            max_iterations: 200,
-            tolerance: 1e-6,
-            damping: 0.5,
-            enable_fallback: true,
-        }
-    }
-}
-
-impl SolverConfig {
-    /// Creates a new solver configuration with default settings.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Sets the recycle solver method.
-    pub fn with_method(mut self, method: recycle::SolverMethod) -> Self {
-        self.recycle_method = method;
-        self
-    }
-
-    /// Sets the maximum iterations.
-    pub fn with_max_iterations(mut self, max_iterations: usize) -> Self {
-        self.max_iterations = max_iterations;
-        self
-    }
-
-    /// Sets the convergence tolerance.
-    pub fn with_tolerance(mut self, tolerance: f64) -> Self {
-        self.tolerance = tolerance;
-        self
-    }
-
-    /// Sets the damping factor for fixed-point iterations.
-    pub fn with_damping(mut self, damping: f64) -> Self {
-        self.damping = damping.clamp(0.0, 1.0);
-        self
-    }
-
-    /// Enables or disables fallback to alternative methods on failure.
-    pub fn with_fallback(mut self, enable: bool) -> Self {
-        self.enable_fallback = enable;
-        self
-    }
-}
-
-/// Unified flowsheet solver with default configuration.
-///
-/// Automatically detects flowsheet topology and chooses the appropriate solver:
-/// - **Acyclic flowsheets**: Uses steady-state Newton-Raphson solver
-/// - **Cyclic flowsheets**: Uses recycle/tear-stream solver with Wegstein method
-///
-/// For custom configuration, use [`solve_with_config`] instead.
-pub fn solve<T: crate::TimeDomain>(
-    flowsheet: &crate::Flowsheet<T>,
-) -> SolverResult<FlowsheetSolution> {
-    solve_with_config(flowsheet, &SolverConfig::default())
-}
-
-/// Unified flowsheet solver with custom configuration.
-///
-/// Allows users to specify solver method, tolerances, and other parameters.
-///
-/// # Example
-///
-/// ```ignore
-/// use nomata::{Flowsheet, Steady, solvers::{solve_with_config, SolverConfig}};
-/// use nomata::solvers::recycle::SolverMethod;
-///
-/// let flowsheet = Flowsheet::<Steady>::new();
-/// let config = SolverConfig::new()
-///     .with_method(SolverMethod::Newton)
-///     .with_tolerance(1e-8)
-///     .with_max_iterations(500);
-///
-/// let solution = solve_with_config(&flowsheet, &config)?;
-/// ```
-pub fn solve_with_config<T: crate::TimeDomain>(
-    flowsheet: &crate::Flowsheet<T>,
-    config: &SolverConfig,
-) -> SolverResult<FlowsheetSolution> {
-    // Check if flowsheet has cycles
-    let cycles = flowsheet.detect_cycles();
-
-    if cycles.is_empty() {
-        // No cycles - use steady-state solver
-        solve_steady_state_unified(flowsheet)
-    } else {
-        // Has cycles - use recycle solver
-        solve_with_recycle(flowsheet, config, cycles.len())
-    }
-}
-
-/// Internal function to solve flowsheets with recycle loops.
-///
-/// Uses the RecycleSolver with the configured method to converge tear streams.
-fn solve_with_recycle<T: crate::TimeDomain>(
-    flowsheet: &crate::Flowsheet<T>,
-    config: &SolverConfig,
-    num_cycles: usize,
-) -> SolverResult<FlowsheetSolution> {
-    use recycle::RecycleSolver;
-
-    // Create registry from equations
-    let registry = flowsheet.create_registry();
-    let equations = flowsheet.equations();
-
-    // Get initial guess from registry
-    let initial_guess = registry.get_all_values();
-    let n_vars = initial_guess.len();
-
-    if n_vars == 0 {
-        // No variables to solve - this is likely a configuration error
-        // (e.g., forgot to call harvest_equations())
-        return Err(SolverError::NoVariablesToSolve);
-    }
-
-    // Create the recycle solver with user-configured method
-    let mut solver =
-        RecycleSolver::with_method(config.recycle_method, config.max_iterations, config.tolerance);
-
-    // Capture damping factor
-    let damping = config.damping;
-
-    // Define the flowsheet computation function for non-autodiff path
-    #[cfg(not(feature = "autodiff"))]
-    let compute_flowsheet = |tear_values: &[f64]| -> Vec<f64> {
-        // Start with current tear stream values
-        let mut state = tear_values.to_vec();
-
-        // Ensure state vector is the right size
-        if state.len() < n_vars {
-            state.resize(n_vars, 0.0);
-        }
-
-        // Evaluate the equation residuals
-        let derivatives = vec![0.0; state.len()];
-        let residuals = equations.evaluate_residuals(&state, &derivatives, 0.0);
-
-        // For fixed-point iteration: x_new = x - alpha * F(x)
-        for i in 0..state.len().min(residuals.len()) {
-            state[i] -= damping * residuals[i];
-        }
-
-        // Return updated values (only the tear stream portion)
-        state[..tear_values.len()].to_vec()
-    };
-
-    // Define the flowsheet computation function for autodiff path
-    #[cfg(feature = "autodiff")]
-    let compute_flowsheet = |tear_values: &[num_dual::Dual64]| -> Vec<num_dual::Dual64> {
-        use num_dual::Dual64;
-
-        // Extract real parts for equation evaluation
-        let real_values: Vec<f64> = tear_values.iter().map(|d| d.re).collect();
-
-        // Start with current tear stream values
-        let mut state = real_values.clone();
-
-        // Ensure state vector is the right size
-        if state.len() < n_vars {
-            state.resize(n_vars, 0.0);
-        }
-
-        // Evaluate the equation residuals
-        let derivatives = vec![0.0; state.len()];
-        let residuals = equations.evaluate_residuals(&state, &derivatives, 0.0);
-
-        // For fixed-point iteration: x_new = x - alpha * F(x)
-        for i in 0..state.len().min(residuals.len()) {
-            state[i] -= damping * residuals[i];
-        }
-
-        // Return updated values as Dual64 (only the tear stream portion)
-        state[..tear_values.len()].iter().map(|&v| Dual64::from(v)).collect()
-    };
-
-    // Solve the recycle system
-    match solver.solve(initial_guess.clone(), compute_flowsheet) {
-        Ok(solution) => {
-            let stats = SolverStats {
-                iterations: solution.iterations,
-                function_evals: solution.iterations,
-                jacobian_evals: if config.recycle_method == recycle::SolverMethod::Wegstein {
-                    0
-                } else {
-                    solution.iterations
-                },
-                final_residual: solution.final_residual,
-            };
-
-            Ok(FlowsheetSolution::Recycle { tear_values: solution.tear_stream_values, stats })
-        }
-        Err(recycle::RecycleError::ConvergenceFailure { iterations, final_residual: _ })
-            if config.enable_fallback =>
-        {
-            // Try falling back to Newton method for difficult cases
-            let mut newton_solver = RecycleSolver::with_method(
-                recycle::SolverMethod::Newton,
-                config.max_iterations,
-                config.tolerance,
-            );
-
-            match newton_solver.solve(initial_guess, compute_flowsheet) {
-                Ok(solution) => {
-                    let stats = SolverStats {
-                        iterations: iterations + solution.iterations,
-                        function_evals: iterations + solution.iterations,
-                        jacobian_evals: solution.iterations,
-                        final_residual: solution.final_residual,
-                    };
-
-                    Ok(FlowsheetSolution::Recycle {
-                        tear_values: solution.tear_stream_values,
-                        stats,
-                    })
-                }
-                Err(_) => Err(SolverError::MaxIterationsExceeded),
-            }
-        }
-        Err(recycle::RecycleError::ConvergenceFailure { .. }) => {
-            Err(SolverError::MaxIterationsExceeded)
-        }
-        Err(recycle::RecycleError::InvalidTearStream(msg)) => Err(SolverError::InvalidTearStream(
-            format!("{} (detected {} cycle(s))", msg, num_cycles),
-        )),
-        Err(recycle::RecycleError::FeatureNotEnabled) => Err(SolverError::FeatureNotEnabled),
-    }
-}
-
-/// Internal function to solve acyclic flowsheets.
-fn solve_steady_state_unified<T: crate::TimeDomain>(
-    flowsheet: &crate::Flowsheet<T>,
-) -> SolverResult<FlowsheetSolution> {
-    // Create registry from equations
-    let registry = flowsheet.create_registry();
-
-    let equations = flowsheet.equations();
-    let initial_guess = registry.get_all_values();
-
-    // Define combined residual and Jacobian function
-    let f = |x: &[f64]| -> (Vec<f64>, Vec<Vec<f64>>) {
-        let derivatives = vec![0.0; x.len()];
-        let residuals = equations.evaluate_residuals(x, &derivatives, 0.0);
-        let jacobian = equations.compute_jacobian(x);
-        (residuals, jacobian)
-    };
-
-    // Solve using Newton-Raphson with statistics
-    let solver = NewtonRaphson::new(1e-6, 100);
-    let (solution, stats) = solver.solve_with_stats(f, &initial_guess)?;
-
-    Ok(FlowsheetSolution::SteadyState { values: solution, stats })
 }
 
 /// Steady-State Flowsheet Solver
@@ -1061,6 +432,771 @@ impl Default for SteadyStateSolver {
     }
 }
 
+/// Typed identifier for a unit in an EOFlowsheet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UnitId(pub usize);
+
+/// Typed identifier for a connection in an EOFlowsheet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ConnectionId(pub usize);
+
+/// Stream state: flow, temperature, pressure.
+#[derive(Debug, Clone, Copy)]
+pub struct StreamData {
+    /// Mass or molar flow rate
+    pub flow: f64,
+    /// Temperature (K)
+    pub temperature: f64,
+    /// Pressure (Pa)
+    pub pressure: f64,
+}
+
+impl StreamData {
+    /// Creates a new stream with the given properties.
+    pub fn new(flow: f64, temperature: f64, pressure: f64) -> Self {
+        StreamData { flow, temperature, pressure }
+    }
+}
+
+/// Reference to an outlet port of a unit.
+#[derive(Debug, Clone, Copy)]
+pub struct OutletPort {
+    /// The unit that has the outlet
+    pub unit_id: UnitId,
+    /// Port index (0 for first outlet, 1 for second, etc.)
+    pub port: usize,
+}
+
+/// Reference to an inlet port of a unit.
+#[derive(Debug, Clone, Copy)]
+pub struct InletPort {
+    /// The unit that has the inlet
+    pub unit_id: UnitId,
+    /// Port index (0 for first inlet, 1 for second, etc.)
+    pub port: usize,
+}
+
+/// Object-safe wrapper for [`EquationModel`].
+///
+/// This trait mirrors `EquationModel` but is dyn-compatible, enabling
+/// heterogeneous collections of unit operations inside flowsheets.
+pub trait EquationModelDyn {
+    /// Number of variables in the model.
+    fn n_variables(&self) -> usize;
+    /// Number of equations (residuals) in the model.
+    fn n_equations(&self) -> usize;
+    /// Names of the variables, in order.
+    fn variable_names(&self) -> Vec<&str>;
+    /// Compute residuals given variable values.
+    fn residuals(&self, vars: &[f64]) -> Vec<f64>;
+    /// Get the current variable values.
+    fn get_variables(&self) -> Vec<f64>;
+    /// Set variable values.
+    fn set_variables(&mut self, vars: &[f64]);
+    /// Returns indices of variables that are free (to be solved).
+    fn free_indices(&self) -> Vec<usize>;
+    /// Returns the outlet stream values (flow, temp, pressure) for port 0.
+    fn get_outlet(&self) -> (f64, f64, f64) {
+        let vars = self.get_variables();
+        let n = vars.len();
+        if n >= 6 {
+            (vars[n - 3], vars[n - 2], vars[n - 1])
+        } else if n >= 3 {
+            (vars[0], vars[1], vars[2])
+        } else {
+            (0.0, 0.0, 0.0)
+        }
+    }
+    /// Compute residuals with dual numbers for automatic differentiation.
+    #[cfg(feature = "autodiff")]
+    fn residuals_dual(&self, vars: &[num_dual::Dual64]) -> Vec<num_dual::Dual64>;
+}
+
+impl<T: EquationModel> EquationModelDyn for T {
+    fn n_variables(&self) -> usize {
+        EquationModel::n_variables(self)
+    }
+    fn n_equations(&self) -> usize {
+        EquationModel::n_equations(self)
+    }
+    fn variable_names(&self) -> Vec<&str> {
+        EquationModel::variable_names(self)
+    }
+    fn residuals(&self, vars: &[f64]) -> Vec<f64> {
+        EquationModel::residuals(self, vars)
+    }
+    fn get_variables(&self) -> Vec<f64> {
+        EquationModel::get_variables(self)
+    }
+    fn set_variables(&mut self, vars: &[f64]) {
+        EquationModel::set_variables(self, vars)
+    }
+    fn free_indices(&self) -> Vec<usize> {
+        EquationModel::free_indices(self)
+    }
+    #[cfg(feature = "autodiff")]
+    fn residuals_dual(&self, vars: &[num_dual::Dual64]) -> Vec<num_dual::Dual64> {
+        EquationModel::residuals_dual(self, vars)
+    }
+}
+
+/// Solves a single [`EquationModel`] using Newton-Raphson.
+///
+/// When the `autodiff` feature is enabled, the Jacobian is computed via
+/// forward-mode automatic differentiation; otherwise central finite differences
+/// are used as a fallback.
+///
+/// # Arguments
+///
+/// * `model` - The equation model to solve (free variables are determined by
+///   [`EquationModel::free_indices`]).
+/// * `tolerance` - L2-norm convergence tolerance for residuals.
+/// * `max_iterations` - Maximum Newton iterations before failure.
+///
+/// # Returns
+///
+/// [`SolverStats`] on convergence; a [`SolverError`] otherwise.
+///
+/// # Example
+///
+/// ```ignore
+/// use nomata::prelude::*;
+/// let mut pump = Pump::new("pump").with_outlet_pressure(5e5).build()?;
+/// feed_stream.connect_to(&mut pump);
+/// let stats = solve_equation_model(&mut pump, 1e-10, 100)?;
+/// println!("Solved in {} iterations", stats.iterations);
+/// ```
+pub fn solve_equation_model<M: EquationModel>(
+    model: &mut M,
+    tolerance: f64,
+    max_iterations: usize,
+) -> SolverResult<SolverStats> {
+    let all_vars = model.get_variables();
+    let free_indices = model.free_indices();
+    let n_free = free_indices.len();
+    let n_eqs = model.n_equations();
+
+    if n_free == 0 {
+        return Err(SolverError::NoVariablesToSolve);
+    }
+    if n_eqs == 0 {
+        return Err(SolverError::NoEquations);
+    }
+
+    let mut all_vars = all_vars;
+    let mut x: Vec<f64> = free_indices.iter().map(|&i| all_vars[i]).collect();
+
+    for iteration in 0..max_iterations {
+        // Reconstruct full variable vector.
+        for (j, &idx) in free_indices.iter().enumerate() {
+            all_vars[idx] = x[j];
+        }
+
+        let residuals = model.residuals(&all_vars);
+        let norm = residuals.iter().map(|r| r * r).sum::<f64>().sqrt();
+
+        if norm < tolerance {
+            model.set_variables(&all_vars);
+            return Ok(SolverStats {
+                iterations: iteration + 1,
+                function_evals: iteration + 1,
+                jacobian_evals: iteration + 1,
+                final_residual: norm,
+            });
+        }
+
+        // Compute Jacobian: AD when available, central FD otherwise.
+        #[cfg(feature = "autodiff")]
+        let jacobian = {
+            let all_vars_snap = all_vars.clone();
+            let dual_fn = |free_vars: &[num_dual::Dual64]| -> Vec<num_dual::Dual64> {
+                let mut vars: Vec<num_dual::Dual64> =
+                    all_vars_snap.iter().map(|&v| num_dual::Dual64::from(v)).collect();
+                for (j, &idx) in free_indices.iter().enumerate() {
+                    vars[idx] = free_vars[j];
+                }
+                model.residuals_dual(&vars)
+            };
+            compute_jacobian(dual_fn, &x)
+        };
+
+        #[cfg(feature = "autodiff")]
+        let jac_entries = jacobian.entries;
+
+        #[cfg(not(feature = "autodiff"))]
+        let jac_entries = {
+            let free_indices_snap = free_indices.clone();
+            let all_vars_snap = all_vars.clone();
+            let residual_fn_fd = |free_vars: &[f64]| -> Vec<f64> {
+                let mut vars = all_vars_snap.clone();
+                for (j, &idx) in free_indices_snap.iter().enumerate() {
+                    vars[idx] = free_vars[j];
+                }
+                model.residuals(&vars)
+            };
+            let mut entries = vec![0.0f64; n_eqs * n_free];
+            for i in 0..n_free {
+                let h = 1e-8 * (1.0 + x[i].abs());
+                let mut x_p = x.clone();
+                x_p[i] += h;
+                let f_p = residual_fn_fd(&x_p);
+                let mut x_m = x.clone();
+                x_m[i] -= h;
+                let f_m = residual_fn_fd(&x_m);
+                for j in 0..n_eqs {
+                    entries[j * n_free + i] = (f_p[j] - f_m[j]) / (2.0 * h);
+                }
+            }
+            entries
+        };
+
+        let r_vec = DVector::from_vec(residuals);
+        let j_mat = DMatrix::from_row_slice(n_eqs, n_free, &jac_entries);
+
+        let dx = if n_eqs == n_free {
+            let decomp = j_mat.lu();
+            match decomp.solve(&(-&r_vec)) {
+                Some(sol) => sol,
+                None => return Err(SolverError::SingularJacobian),
+            }
+        } else {
+            j_mat
+                .svd(true, true)
+                .solve(&(-&r_vec), 1e-12)
+                .map_err(|_| SolverError::SingularJacobian)?
+        };
+
+        for i in 0..n_free {
+            x[i] += dx[i];
+        }
+
+        if iteration > 10 && norm > 1e10 {
+            return Err(SolverError::Diverged);
+        }
+    }
+
+    Err(SolverError::MaxIterationsExceeded)
+}
+
+/// Statistics from a completed sequential-modular solve.
+#[derive(Debug, Clone)]
+pub struct SMSolverStats {
+    /// Total Newton iterations summed across all units.
+    pub total_iterations: usize,
+    /// Number of unit operations solved.
+    pub units_solved: usize,
+    /// Maximum residual norm observed across all units at convergence.
+    pub max_unit_residual: f64,
+}
+
+/// Equation-Oriented (EO) flowsheet.
+///
+/// Assembles all unit equations into one system and solves simultaneously
+/// using Newton-Raphson. Supports forward-mode AD Jacobian evaluation via
+/// the `autodiff` feature; falls back to central finite differences when that
+/// feature is absent.
+pub struct EOFlowsheet {
+    /// Units indexed by UnitId.
+    pub(crate) units: Vec<(String, Box<dyn EquationModelDyn>)>,
+    /// Connections: (from_unit, from_var_indices, to_unit, to_var_indices).
+    pub(crate) connections: Vec<(usize, Vec<usize>, usize, Vec<usize>)>,
+    /// Feeds: (unit_index, var_indices, values).
+    pub(crate) feeds: Vec<(usize, Vec<usize>, Vec<f64>)>,
+}
+
+impl EOFlowsheet {
+    /// Creates a new empty flowsheet.
+    pub fn new() -> Self {
+        EOFlowsheet { units: Vec::new(), connections: Vec::new(), feeds: Vec::new() }
+    }
+
+    /// Adds a unit to the flowsheet and returns its [`UnitId`].
+    pub fn add<M: EquationModel + 'static>(&mut self, name: &str, unit: M) -> UnitId {
+        let id = UnitId(self.units.len());
+        self.units.push((name.to_string(), Box::new(unit)));
+        id
+    }
+
+    /// Returns the variable offset for a given unit index.
+    pub(crate) fn var_offset(&self, unit_idx: usize) -> usize {
+        self.units[..unit_idx].iter().map(|(_, u)| u.n_variables()).sum()
+    }
+
+    /// Total number of variables across all units.
+    pub fn total_variables(&self) -> usize {
+        self.units.iter().map(|(_, u)| u.n_variables()).sum()
+    }
+
+    /// Total number of equations (unit equations + connection constraints).
+    pub fn total_equations(&self) -> usize {
+        let unit_eqs: usize = self.units.iter().map(|(_, u)| u.n_equations()).sum();
+        let conn_eqs: usize =
+            self.connections.iter().map(|(_, fv, _, tv)| fv.len().min(tv.len())).sum();
+        unit_eqs + conn_eqs
+    }
+
+    /// Connects the outlet variables of `src` to the inlet variables of `dst`.
+    ///
+    /// `src_vars` and `dst_vars` list the variable indices (within each unit's
+    /// own variable vector) that should be equated.
+    pub fn connect(
+        &mut self,
+        src: UnitId,
+        src_vars: Vec<usize>,
+        dst: UnitId,
+        dst_vars: Vec<usize>,
+    ) -> ConnectionId {
+        let id = ConnectionId(self.connections.len());
+        self.connections.push((src.0, src_vars, dst.0, dst_vars));
+        id
+    }
+
+    /// Sets feed stream values for a unit.
+    ///
+    /// The solver will fix these variables at the given values throughout the solve.
+    pub fn set_feed(&mut self, unit: UnitId, var_indices: Vec<usize>, values: Vec<f64>) {
+        self.feeds.push((unit.0, var_indices, values));
+    }
+
+    /// Returns all variables as a flat vector, applying feeds.
+    pub(crate) fn collect_vars(&self) -> Vec<f64> {
+        let mut vars: Vec<f64> = self.units.iter().flat_map(|(_, u)| u.get_variables()).collect();
+        for (unit_idx, var_idxs, values) in &self.feeds {
+            let offset = self.var_offset(*unit_idx);
+            for (vi, val) in var_idxs.iter().zip(values.iter()) {
+                vars[offset + vi] = *val;
+            }
+        }
+        vars
+    }
+
+    /// Sets all variables from a flat vector back into each unit.
+    pub(crate) fn set_all_variables(&mut self, vars: &[f64]) {
+        let mut offset = 0;
+        for (_, unit) in &mut self.units {
+            let n = unit.n_variables();
+            unit.set_variables(&vars[offset..offset + n]);
+            offset += n;
+        }
+    }
+
+    /// Evaluates the full system of residuals (unit equations + connections).
+    pub fn residuals(&self, vars: &[f64]) -> Vec<f64> {
+        let mut all_residuals = Vec::new();
+        // Unit equations.
+        let mut offset = 0;
+        for (_, unit) in &self.units {
+            let n = unit.n_variables();
+            all_residuals.extend(unit.residuals(&vars[offset..offset + n]));
+            offset += n;
+        }
+        // Connection constraints: src_var == dst_var.
+        for (src_idx, src_vars, dst_idx, dst_vars) in &self.connections {
+            let src_off = self.var_offset(*src_idx);
+            let dst_off = self.var_offset(*dst_idx);
+            for (&sv, &dv) in src_vars.iter().zip(dst_vars.iter()) {
+                all_residuals.push(vars[src_off + sv] - vars[dst_off + dv]);
+            }
+        }
+        all_residuals
+    }
+
+    /// Evaluate residuals with dual numbers for forward-mode AD.
+    #[cfg(feature = "autodiff")]
+    pub fn residuals_dual(&self, vars: &[num_dual::Dual64]) -> Vec<num_dual::Dual64> {
+        let mut all_residuals = Vec::new();
+        let mut offset = 0;
+        for (_, unit) in &self.units {
+            let n = unit.n_variables();
+            all_residuals.extend(unit.residuals_dual(&vars[offset..offset + n]));
+            offset += n;
+        }
+        for (src_idx, src_vars, dst_idx, dst_vars) in &self.connections {
+            let src_off = self.var_offset(*src_idx);
+            let dst_off = self.var_offset(*dst_idx);
+            for (&sv, &dv) in src_vars.iter().zip(dst_vars.iter()) {
+                let diff = vars[src_off + sv] - vars[dst_off + dv];
+                all_residuals.push(diff);
+            }
+        }
+        all_residuals
+    }
+
+    /// Solves the entire flowsheet simultaneously using Newton-Raphson.
+    ///
+    /// The solver determines free variables (not pinned as feeds), assembles
+    /// the combined residual vector, and iterates until convergence.
+    pub fn solve(&mut self, tolerance: f64, max_iterations: usize) -> SolverResult<SolverStats> {
+        // Collect all variables; apply feeds.
+        let mut all_vars = self.collect_vars();
+        let n_total = all_vars.len();
+
+        // Determine which variable indices are free (not pinned by feeds).
+        let mut pinned: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for (unit_idx, var_idxs, _) in &self.feeds {
+            let offset = self.var_offset(*unit_idx);
+            for vi in var_idxs {
+                pinned.insert(offset + vi);
+            }
+        }
+
+        let free_indices: Vec<usize> = (0..n_total).filter(|i| !pinned.contains(i)).collect();
+        let n_free = free_indices.len();
+        let n_eqs = self.total_equations();
+
+        if n_free == 0 {
+            return Err(SolverError::NoVariablesToSolve);
+        }
+        if n_eqs == 0 {
+            return Err(SolverError::NoEquations);
+        }
+
+        let mut x: Vec<f64> = free_indices.iter().map(|&i| all_vars[i]).collect();
+
+        for iteration in 0..max_iterations {
+            // Reconstruct full variable vector.
+            for (j, &idx) in free_indices.iter().enumerate() {
+                all_vars[idx] = x[j];
+            }
+            // Re-apply feeds.
+            for (unit_idx, var_idxs, values) in &self.feeds {
+                let offset = self.var_offset(*unit_idx);
+                for (vi, val) in var_idxs.iter().zip(values.iter()) {
+                    all_vars[offset + vi] = *val;
+                }
+            }
+
+            let residuals = self.residuals(&all_vars);
+            let norm = residuals.iter().map(|r| r * r).sum::<f64>().sqrt();
+
+            if norm < tolerance {
+                for (j, &idx) in free_indices.iter().enumerate() {
+                    all_vars[idx] = x[j];
+                }
+                for (unit_idx, var_idxs, values) in &self.feeds {
+                    let offset = self.var_offset(*unit_idx);
+                    for (vi, val) in var_idxs.iter().zip(values.iter()) {
+                        all_vars[offset + vi] = *val;
+                    }
+                }
+                self.set_all_variables(&all_vars);
+
+                return Ok(SolverStats {
+                    iterations: iteration + 1,
+                    function_evals: iteration + 1,
+                    jacobian_evals: iteration + 1,
+                    final_residual: norm,
+                });
+            }
+
+            // Compute Jacobian.
+            #[cfg(feature = "autodiff")]
+            let jacobian = {
+                let all_vars_snap = all_vars.clone();
+                let free_indices_snap = free_indices.clone();
+                let dual_fn = |free_vars: &[num_dual::Dual64]| -> Vec<num_dual::Dual64> {
+                    let mut vars: Vec<num_dual::Dual64> =
+                        all_vars_snap.iter().map(|&v| num_dual::Dual64::from(v)).collect();
+                    for (j, &idx) in free_indices_snap.iter().enumerate() {
+                        vars[idx] = free_vars[j];
+                    }
+                    for (unit_idx, var_idxs, values) in &self.feeds {
+                        let offset = self.var_offset(*unit_idx);
+                        for (vi, val) in var_idxs.iter().zip(values.iter()) {
+                            vars[offset + vi] = num_dual::Dual64::from(*val);
+                        }
+                    }
+                    self.residuals_dual(&vars)
+                };
+                compute_jacobian(dual_fn, &x)
+            };
+
+            #[cfg(feature = "autodiff")]
+            let jac_entries = jacobian.entries;
+
+            #[cfg(not(feature = "autodiff"))]
+            let jac_entries = {
+                let free_indices_snap = free_indices.clone();
+                let all_vars_snap = all_vars.clone();
+                let feeds_snap: Vec<(usize, Vec<usize>, Vec<f64>)> =
+                    self.feeds.iter().map(|(u, vi, vals)| (*u, vi.clone(), vals.clone())).collect();
+                let residual_fn_fd = |free_vars: &[f64]| -> Vec<f64> {
+                    let mut vars = all_vars_snap.clone();
+                    for (j, &idx) in free_indices_snap.iter().enumerate() {
+                        vars[idx] = free_vars[j];
+                    }
+                    for (unit_idx, var_idxs, values) in &feeds_snap {
+                        let offset = self.var_offset(*unit_idx);
+                        for (vi, val) in var_idxs.iter().zip(values.iter()) {
+                            vars[offset + vi] = *val;
+                        }
+                    }
+                    self.residuals(&vars)
+                };
+                let mut entries = vec![0.0f64; n_eqs * n_free];
+                for i in 0..n_free {
+                    let h = 1e-8 * (1.0 + x[i].abs());
+                    let mut x_p = x.clone();
+                    x_p[i] += h;
+                    let f_p = residual_fn_fd(&x_p);
+                    let mut x_m = x.clone();
+                    x_m[i] -= h;
+                    let f_m = residual_fn_fd(&x_m);
+                    for j in 0..n_eqs {
+                        entries[j * n_free + i] = (f_p[j] - f_m[j]) / (2.0 * h);
+                    }
+                }
+                entries
+            };
+
+            let r_vec = DVector::from_vec(residuals);
+            let j_mat = DMatrix::from_row_slice(n_eqs, n_free, &jac_entries);
+
+            let dx = if n_eqs == n_free {
+                let decomp = j_mat.lu();
+                match decomp.solve(&(-&r_vec)) {
+                    Some(sol) => sol,
+                    None => return Err(SolverError::SingularJacobian),
+                }
+            } else {
+                j_mat
+                    .svd(true, true)
+                    .solve(&(-&r_vec), 1e-12)
+                    .map_err(|_| SolverError::SingularJacobian)?
+            };
+
+            for i in 0..n_free {
+                x[i] += dx[i];
+            }
+
+            if iteration > 10 && norm > 1e10 {
+                return Err(SolverError::Diverged);
+            }
+        }
+
+        Err(SolverError::MaxIterationsExceeded)
+    }
+
+    /// Gets variables for a unit by UnitId.
+    pub fn variables(&self, unit: UnitId) -> Vec<f64> {
+        self.units[unit.0].1.get_variables()
+    }
+
+    /// Gets outlet stream values (flow, temperature, pressure) for a unit.
+    pub fn outlet(&self, unit: UnitId) -> (f64, f64, f64) {
+        self.units[unit.0].1.get_outlet()
+    }
+
+    /// Prints a human-readable summary of the flowsheet.
+    pub fn describe(&self) {
+        println!(
+            "EOFlowsheet({} units, {} connections):",
+            self.units.len(),
+            self.connections.len()
+        );
+        for (i, (name, unit)) in self.units.iter().enumerate() {
+            println!("  [{}] {}: {} vars, {} eqs", i, name, unit.n_variables(), unit.n_equations());
+        }
+    }
+}
+
+impl Default for EOFlowsheet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Solves a single boxed [`EquationModelDyn`] unit using Newton-Raphson.
+///
+/// Used internally by [`SMFlowsheet::solve`] to solve each unit in sequence.
+fn solve_unit_dyn(
+    unit: &mut dyn EquationModelDyn,
+    tolerance: f64,
+    max_iterations: usize,
+) -> SolverResult<SolverStats> {
+    let free_indices = unit.free_indices();
+    let n_free = free_indices.len();
+    let n_eqs = unit.n_equations();
+
+    if n_free == 0 {
+        return Err(SolverError::NoVariablesToSolve);
+    }
+    if n_eqs == 0 {
+        return Err(SolverError::NoEquations);
+    }
+
+    let base_vars = unit.get_variables();
+    let mut x: Vec<f64> = free_indices.iter().map(|&i| base_vars[i]).collect();
+
+    for iteration in 0..max_iterations {
+        let mut vars = base_vars.clone();
+        for (j, &idx) in free_indices.iter().enumerate() {
+            vars[idx] = x[j];
+        }
+
+        let residuals = unit.residuals(&vars);
+        let norm = residuals.iter().map(|r| r * r).sum::<f64>().sqrt();
+
+        if norm < tolerance {
+            unit.set_variables(&vars);
+            return Ok(SolverStats {
+                iterations: iteration + 1,
+                function_evals: iteration + 1,
+                jacobian_evals: iteration + 1,
+                final_residual: norm,
+            });
+        }
+
+        // Compute Jacobian: AD when available, forward FD otherwise.
+        #[cfg(feature = "autodiff")]
+        let jacobian = {
+            let base_vars_snap = base_vars.clone();
+            let free_indices_snap = free_indices.clone();
+            let dual_fn = |free_vars: &[num_dual::Dual64]| -> Vec<num_dual::Dual64> {
+                let mut dual_vars: Vec<num_dual::Dual64> =
+                    base_vars_snap.iter().map(|&v| num_dual::Dual64::from(v)).collect();
+                for (j, &idx) in free_indices_snap.iter().enumerate() {
+                    dual_vars[idx] = free_vars[j];
+                }
+                unit.residuals_dual(&dual_vars)
+            };
+            compute_jacobian(dual_fn, &x)
+        };
+
+        #[cfg(feature = "autodiff")]
+        let jac_entries = jacobian.entries;
+
+        #[cfg(not(feature = "autodiff"))]
+        let jac_entries = {
+            let mut entries = vec![0.0; n_eqs * n_free];
+            for j in 0..n_free {
+                let step = 1e-8 * (1.0 + x[j].abs());
+                let mut vars_p = vars.clone();
+                vars_p[free_indices[j]] += step;
+                let r_p = unit.residuals(&vars_p);
+                for i in 0..n_eqs {
+                    entries[i * n_free + j] = (r_p[i] - residuals[i]) / step;
+                }
+            }
+            entries
+        };
+
+        let r_vec = DVector::from_vec(residuals);
+        let j_mat = DMatrix::from_row_slice(n_eqs, n_free, &jac_entries);
+
+        let dx = if n_eqs == n_free {
+            match j_mat.lu().solve(&(-&r_vec)) {
+                Some(sol) => sol,
+                None => return Err(SolverError::SingularJacobian),
+            }
+        } else {
+            j_mat
+                .svd(true, true)
+                .solve(&(-&r_vec), 1e-12)
+                .map_err(|_| SolverError::SingularJacobian)?
+        };
+
+        for i in 0..n_free {
+            x[i] += dx[i];
+        }
+
+        if iteration > 10 && norm > 1e10 {
+            return Err(SolverError::Diverged);
+        }
+    }
+
+    Err(SolverError::MaxIterationsExceeded)
+}
+
+/// Sequential-Modular (SM) flowsheet solver.
+///
+/// Solves units one at a time in topological order. Each unit is solved
+/// independently using Newton-Raphson; outlet stream values are then
+/// propagated to the inlets of downstream units before they are solved.
+pub struct SMFlowsheet {
+    /// Units in execution order, with their names.
+    units: Vec<(String, Box<dyn EquationModelDyn>)>,
+    /// Propagation connections: (src_unit, src_vars, dst_unit, dst_vars).
+    connections: Vec<(usize, Vec<usize>, usize, Vec<usize>)>,
+}
+
+impl SMFlowsheet {
+    /// Creates a new empty SMFlowsheet.
+    pub fn new() -> Self {
+        SMFlowsheet { units: Vec::new(), connections: Vec::new() }
+    }
+
+    /// Adds a unit in sequential execution order. Returns its [`UnitId`].
+    pub fn add<M: EquationModel + 'static>(&mut self, name: &str, unit: M) -> UnitId {
+        let id = UnitId(self.units.len());
+        self.units.push((name.to_string(), Box::new(unit)));
+        id
+    }
+
+    /// Adds a propagation connection between units.
+    pub fn connect(
+        &mut self,
+        src: UnitId,
+        src_vars: Vec<usize>,
+        dst: UnitId,
+        dst_vars: Vec<usize>,
+    ) -> ConnectionId {
+        let id = ConnectionId(self.connections.len());
+        self.connections.push((src.0, src_vars, dst.0, dst_vars));
+        id
+    }
+
+    /// Solves all units in sequence until convergence, propagating stream values.
+    ///
+    /// Returns aggregated [`SMSolverStats`] covering all units.
+    pub fn solve(&mut self, tolerance: f64, max_iterations: usize) -> SolverResult<SMSolverStats> {
+        let mut total_iterations = 0;
+        let mut max_residual = 0.0f64;
+
+        // Propagate connections before each unit solve.
+        let n_units = self.units.len();
+        for unit_idx in 0..n_units {
+            // Propagate inlet values from upstream units.
+            for (src_idx, src_vars, dst_idx, dst_vars) in &self.connections {
+                if *dst_idx == unit_idx {
+                    let src_vals: Vec<f64> = {
+                        let src_unit = &self.units[*src_idx].1;
+                        let src_full = src_unit.get_variables();
+                        src_vars.iter().map(|&vi| src_full[vi]).collect()
+                    };
+                    let dst_unit = &mut self.units[*dst_idx].1;
+                    let mut dst_full = dst_unit.get_variables();
+                    for (&di, val) in dst_vars.iter().zip(src_vals.iter()) {
+                        dst_full[di] = *val;
+                    }
+                    dst_unit.set_variables(&dst_full);
+                }
+            }
+
+            // Solve this unit.
+            let stats = solve_unit_dyn(self.units[unit_idx].1.as_mut(), tolerance, max_iterations)?;
+            total_iterations += stats.iterations;
+            if stats.final_residual > max_residual {
+                max_residual = stats.final_residual;
+            }
+        }
+
+        Ok(SMSolverStats {
+            total_iterations,
+            units_solved: n_units,
+            max_unit_residual: max_residual,
+        })
+    }
+}
+
+impl Default for SMFlowsheet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub use recycle::RecycleSolver;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1103,17 +1239,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dae_solver_config() {
-        let config = DAESolverConfig::default();
-        assert_eq!(config.atol, 1e-6);
-        assert_eq!(config.rtol, 1e-6);
-    }
-
-    #[test]
     fn test_solver_error_display() {
-        let err = SolverError::FeatureNotEnabled;
-        assert_eq!(err.to_string(), "ODE/DAE solver requires the 'solvers' feature to be enabled");
-
         let err = SolverError::NoVariablesToSolve;
         assert_eq!(
             err.to_string(),
@@ -1122,39 +1248,6 @@ mod tests {
 
         let err = SolverError::InvalidTearStream("test message".to_string());
         assert_eq!(err.to_string(), "Invalid tear stream: test message");
-    }
-
-    #[test]
-    fn test_solve_ode_with_jacobian() {
-        // Test ODE: dy/dt = -y, y(0) = 1
-        // Analytical solution: y(t) = e^(-t)
-        let f = |_t: f64, y: &[f64]| vec![-y[0]];
-        let jacobian = |_t: f64, _y: &[f64]| vec![vec![-1.0]];
-
-        let y0 = vec![1.0];
-        let t_span = (0.0, 1.0);
-
-        let result = solve_ode_with_jacobian::<1, _, _>(
-            f,
-            jacobian,
-            y0,
-            t_span,
-            integration::IntegrationMethod::RK4,
-        )
-        .unwrap();
-
-        // Check that we got some results
-        assert!(!result.is_empty());
-
-        // Check initial condition
-        assert!((result[0].0 - 0.0).abs() < 1e-10);
-        assert!((result[0].1[0] - 1.0).abs() < 1e-10);
-
-        // Check final value is approximately e^(-1) aprox 0.3679
-        let final_t = result.last().unwrap().0;
-        let final_y = result.last().unwrap().1[0];
-        let analytical = (-final_t).exp();
-        assert!((final_y - analytical).abs() < 0.01); // Loose tolerance for integration
     }
 
     #[test]

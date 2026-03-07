@@ -312,7 +312,21 @@ impl Fluid {
         let name = format!("{:?}", mix);
         Self { substance: Substance::PredefinedMix(mix), name, backend: None }
     }
+}
 
+impl From<Pure> for Fluid {
+    fn from(pure: Pure) -> Self {
+        Fluid::new(pure)
+    }
+}
+
+impl From<PredefinedMix> for Fluid {
+    fn from(mix: PredefinedMix) -> Self {
+        Fluid::new_mix(mix)
+    }
+}
+
+impl Fluid {
     /// Creates a new binary mixture fluid using BinaryMixKind.
     ///
     /// # Arguments

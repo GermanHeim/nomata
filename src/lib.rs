@@ -27,6 +27,8 @@ pub use thermodynamics::{
     fluids::{PredefinedMix, Pure},
 };
 
+/// Trait for processing a unit operation with typed inputs and outputs.
+///
 /// This is the primary interface for running unit operations.
 /// Each unit defines its own input and output types, ensuring
 /// type-safe connections at compile time.

@@ -109,9 +109,31 @@ impl<const N: usize, F: FlowBasis> Splitter<N, F> {
     const fn n_vars() -> usize {
         3 + N * 3
     }
+
+    fn residuals_generic<S: crate::Scalar>(&self, vars: &[S]) -> Vec<S> {
+        let f_in = vars[0];
+        let t_in = vars[1];
+        let p_in = vars[2];
+
+        let mut residuals = Vec::with_capacity(N * 3);
+        for i in 0..N {
+            let out_base = 3 + i * 3;
+            let f_out = vars[out_base];
+            let t_out = vars[out_base + 1];
+            let p_out = vars[out_base + 2];
+            residuals.push(f_out - f_in * self.fractions[i]);
+            residuals.push(t_out - t_in);
+            residuals.push(p_out - p_in);
+        }
+        residuals
+    }
 }
 
 impl<const N: usize, F: FlowBasis> EquationModel for Splitter<N, F> {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
     fn n_variables(&self) -> usize {
         Self::n_vars()
     }
@@ -124,35 +146,38 @@ impl<const N: usize, F: FlowBasis> EquationModel for Splitter<N, F> {
     fn variable_names(&self) -> Vec<&str> {
         let mut names = vec!["F_in", "T_in", "P_in"];
         for i in 0..N {
-            names.push(if i == 0 { "F_out1" } else if i == 1 { "F_out2" } else { "F_outN" });
-            names.push(if i == 0 { "T_out1" } else if i == 1 { "T_out2" } else { "T_outN" });
-            names.push(if i == 0 { "P_out1" } else if i == 1 { "P_out2" } else { "P_outN" });
+            names.push(if i == 0 {
+                "F_out1"
+            } else if i == 1 {
+                "F_out2"
+            } else {
+                "F_outN"
+            });
+            names.push(if i == 0 {
+                "T_out1"
+            } else if i == 1 {
+                "T_out2"
+            } else {
+                "T_outN"
+            });
+            names.push(if i == 0 {
+                "P_out1"
+            } else if i == 1 {
+                "P_out2"
+            } else {
+                "P_outN"
+            });
         }
         names
     }
 
     fn residuals(&self, vars: &[f64]) -> Vec<f64> {
-        let f_in = vars[0];
-        let t_in = vars[1];
-        let p_in = vars[2];
+        self.residuals_generic(vars)
+    }
 
-        let mut residuals = Vec::with_capacity(N * 3);
-
-        for i in 0..N {
-            let out_base = 3 + i * 3;
-            let f_out = vars[out_base];
-            let t_out = vars[out_base + 1];
-            let p_out = vars[out_base + 2];
-
-            // Flow split
-            residuals.push(f_out - self.fractions[i] * f_in);
-            // Temperature passthrough
-            residuals.push(t_out - t_in);
-            // Pressure passthrough
-            residuals.push(p_out - p_in);
-        }
-
-        residuals
+    #[cfg(feature = "autodiff")]
+    fn residuals_dual(&self, vars: &[num_dual::Dual64]) -> Vec<num_dual::Dual64> {
+        self.residuals_generic(vars)
     }
 
     fn get_variables(&self) -> Vec<f64> {
@@ -205,11 +230,7 @@ impl<const N: usize, F: FlowBasis> Process for Splitter<N, F> {
                     .with_temperature(data.temperature)
                     .with_pressure(data.pressure)
                     .with_composition(
-                        &data
-                            .components
-                            .iter()
-                            .map(|s| s.as_str())
-                            .collect::<Vec<_>>(),
+                        &data.components.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
                         &data.composition,
                     )
                     .build()?,
@@ -256,10 +277,8 @@ mod tests {
 
     #[test]
     fn test_splitter_2() {
-        let mut splitter = Splitter::<2, MassFlow>::new("test")
-            .with_fractions([0.6, 0.4])
-            .build()
-            .unwrap();
+        let mut splitter =
+            Splitter::<2, MassFlow>::new("test").with_fractions([0.6, 0.4]).build().unwrap();
 
         let feed = Stream::<MassFlow>::new()
             .with_flow(10.0)
@@ -277,10 +296,8 @@ mod tests {
 
     #[test]
     fn test_splitter_3() {
-        let mut splitter = Splitter::<3, MassFlow>::new("test")
-            .with_fractions([0.5, 0.3, 0.2])
-            .build()
-            .unwrap();
+        let mut splitter =
+            Splitter::<3, MassFlow>::new("test").with_fractions([0.5, 0.3, 0.2]).build().unwrap();
 
         let feed = Stream::<MassFlow>::new()
             .with_flow(100.0)

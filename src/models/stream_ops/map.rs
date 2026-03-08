@@ -60,10 +60,7 @@ impl ComponentMapping {
     pub fn new(lumped: &str, detailed: Vec<(&str, f64)>) -> Self {
         ComponentMapping {
             lumped: lumped.to_string(),
-            detailed: detailed
-                .into_iter()
-                .map(|(name, frac)| (name.to_string(), frac))
-                .collect(),
+            detailed: detailed.into_iter().map(|(name, frac)| (name.to_string(), frac)).collect(),
         }
     }
 
@@ -111,14 +108,7 @@ struct MapVars {
 
 impl Default for MapVars {
     fn default() -> Self {
-        MapVars {
-            f_in: 0,
-            t_in: 1,
-            p_in: 2,
-            f_out: 3,
-            t_out: 4,
-            p_out: 5,
-        }
+        MapVars { f_in: 0, t_in: 1, p_in: 2, f_out: 3, t_out: 4, p_out: 5 }
     }
 }
 
@@ -174,9 +164,7 @@ impl Map {
     /// Expected number of inlet components given direction and mappings.
     pub fn input_component_count(&self) -> usize {
         match self.direction {
-            MappingDirection::Lumping => {
-                self.mappings.iter().map(|m| m.detailed_count()).sum()
-            }
+            MappingDirection::Lumping => self.mappings.iter().map(|m| m.detailed_count()).sum(),
             MappingDirection::Delumping => self.mappings.len(),
         }
     }
@@ -185,14 +173,24 @@ impl Map {
     pub fn output_component_count(&self) -> usize {
         match self.direction {
             MappingDirection::Lumping => self.mappings.len(),
-            MappingDirection::Delumping => {
-                self.mappings.iter().map(|m| m.detailed_count()).sum()
-            }
+            MappingDirection::Delumping => self.mappings.iter().map(|m| m.detailed_count()).sum(),
         }
+    }
+
+    fn residuals_generic<S: crate::Scalar>(&self, vars: &[S]) -> Vec<S> {
+        let idx = MapVars::default();
+        let r1 = vars[idx.f_out] - vars[idx.f_in];
+        let r2 = vars[idx.t_out] - vars[idx.t_in];
+        let r3 = vars[idx.p_out] - vars[idx.p_in];
+        vec![r1, r2, r3]
     }
 }
 
 impl EquationModel for Map {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
     fn n_variables(&self) -> usize {
         6
     }
@@ -206,18 +204,12 @@ impl EquationModel for Map {
     }
 
     fn residuals(&self, vars: &[f64]) -> Vec<f64> {
-        let idx = MapVars::default();
+        self.residuals_generic(vars)
+    }
 
-        // Equation 1: Total molar balance
-        let r1 = vars[idx.f_out] - vars[idx.f_in];
-
-        // Equation 2: Temperature passthrough
-        let r2 = vars[idx.t_out] - vars[idx.t_in];
-
-        // Equation 3: Pressure passthrough (no drop)
-        let r3 = vars[idx.p_out] - vars[idx.p_in];
-
-        vec![r1, r2, r3]
+    #[cfg(feature = "autodiff")]
+    fn residuals_dual(&self, vars: &[num_dual::Dual64]) -> Vec<num_dual::Dual64> {
+        self.residuals_generic(vars)
     }
 
     fn get_variables(&self) -> Vec<f64> {
@@ -281,8 +273,7 @@ impl Process for Map {
                 // Components not covered by any mapping are passed through unchanged.
                 let mut out_names: Vec<String> = Vec::new();
                 let mut out_fracs: Vec<f64> = Vec::new();
-                let mut covered: std::collections::HashSet<&str> =
-                    std::collections::HashSet::new();
+                let mut covered: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
                 for mapping in &self.mappings {
                     let lumped_frac: f64 = mapping
@@ -313,14 +304,12 @@ impl Process for Map {
                 // using the defined fractions.
                 let mut out_names: Vec<String> = Vec::new();
                 let mut out_fracs: Vec<f64> = Vec::new();
-                let mut covered: std::collections::HashSet<&str> =
-                    std::collections::HashSet::new();
+                let mut covered: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
                 for mapping in &self.mappings {
                     let lumped_name = mapping.lumped_component();
                     covered.insert(lumped_name);
-                    let lumped_frac =
-                        inlet_fracs.get(lumped_name).copied().unwrap_or(0.0);
+                    let lumped_frac = inlet_fracs.get(lumped_name).copied().unwrap_or(0.0);
 
                     for (detailed_name, split_frac) in mapping.detailed_components() {
                         out_names.push(detailed_name.clone());
@@ -332,9 +321,7 @@ impl Process for Map {
                 for name in &inlet_data.components {
                     if !covered.contains(name.as_str()) {
                         out_names.push(name.clone());
-                        out_fracs.push(
-                            inlet_fracs.get(name.as_str()).copied().unwrap_or(0.0),
-                        );
+                        out_fracs.push(inlet_fracs.get(name.as_str()).copied().unwrap_or(0.0));
                     }
                 }
 

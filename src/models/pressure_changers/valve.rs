@@ -55,14 +55,7 @@ struct ValveVars {
 
 impl Default for ValveVars {
     fn default() -> Self {
-        ValveVars {
-            f_in: 0,
-            t_in: 1,
-            p_in: 2,
-            f_out: 3,
-            t_out: 4,
-            p_out: 5,
-        }
+        ValveVars { f_in: 0, t_in: 1, p_in: 2, f_out: 3, t_out: 4, p_out: 5 }
     }
 }
 
@@ -108,9 +101,37 @@ impl Valve {
     pub fn outlet_pressure_spec(&self) -> Option<f64> {
         self.outlet_pressure
     }
+
+    fn residuals_generic<S: crate::Scalar>(&self, vars: &[S]) -> Vec<S> {
+        let idx = ValveVars::default();
+        let f_in = vars[idx.f_in];
+        let t_in = vars[idx.t_in];
+        let f_out = vars[idx.f_out];
+        let t_out = vars[idx.t_out];
+        let p_in = vars[idx.p_in];
+        let p_out = vars[idx.p_out];
+
+        let r1 = f_out - f_in;
+
+        let r2 = if let Some(dp) = self.pressure_drop {
+            p_out - (p_in - dp)
+        } else if let Some(p_spec) = self.outlet_pressure {
+            p_out - p_spec
+        } else {
+            S::from(0.0)
+        };
+
+        let r3 = t_out - t_in;
+
+        vec![r1, r2, r3]
+    }
 }
 
 impl EquationModel for Valve {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
     fn n_variables(&self) -> usize {
         6
     }
@@ -124,30 +145,12 @@ impl EquationModel for Valve {
     }
 
     fn residuals(&self, vars: &[f64]) -> Vec<f64> {
-        let idx = ValveVars::default();
-        let f_in = vars[idx.f_in];
-        let t_in = vars[idx.t_in];
-        let f_out = vars[idx.f_out];
-        let t_out = vars[idx.t_out];
-        let p_in = vars[idx.p_in];
-        let p_out = vars[idx.p_out];
+        self.residuals_generic(vars)
+    }
 
-        // Equation 1: Mass balance
-        let r1 = f_out - f_in;
-
-        // Equation 2: Pressure specification
-        let r2 = if let Some(dp) = self.pressure_drop {
-            p_out - (p_in - dp)
-        } else if let Some(p_spec) = self.outlet_pressure {
-            p_out - p_spec
-        } else {
-            0.0 // Unreachable if validated
-        };
-
-        // Equation 3: Isenthalpic throttle (T_out = T_in for ideal gas)
-        let r3 = t_out - t_in;
-
-        vec![r1, r2, r3]
+    #[cfg(feature = "autodiff")]
+    fn residuals_dual(&self, vars: &[num_dual::Dual64]) -> Vec<num_dual::Dual64> {
+        self.residuals_generic(vars)
     }
 
     fn get_variables(&self) -> Vec<f64> {
@@ -211,7 +214,28 @@ impl Process for Valve {
             )));
         }
 
-        // Isenthalpic: T_out = T_in (ideal gas / incompressible approximation)
+        // Isenthalpic: T_out is found from h(T_out, P_out) = h(T_in, P_in).
+        // With a fluid set, look up enthalpy at inlet then invert at outlet
+        // pressure via props_ph.  Fall back to T_out = T_in (ideal gas) when
+        // the thermodynamics feature is disabled or no fluid is configured.
+        #[cfg(feature = "thermodynamics")]
+        let outlet_temperature = if let Some(ref fluid) = self.fluid {
+            // Get specific enthalpy at inlet conditions
+            let h_in = fluid
+                .props_pt(inlet_data.pressure, inlet_data.temperature)
+                .map(|p| p.enthalpy)
+                .unwrap_or(0.0);
+            if h_in == 0.0 {
+                // Property lookup failed; fall back to ideal-gas approximation
+                inlet_data.temperature
+            } else {
+                // Find T_out such that h(P_out, T_out) = h_in
+                fluid.props_ph(p_out, h_in).map(|p| p.temperature).unwrap_or(inlet_data.temperature)
+            }
+        } else {
+            inlet_data.temperature
+        };
+        #[cfg(not(feature = "thermodynamics"))]
         let outlet_temperature = inlet_data.temperature;
 
         // Set outlet variables
@@ -224,11 +248,7 @@ impl Process for Valve {
             .with_temperature(outlet_temperature)
             .with_pressure(p_out)
             .with_composition(
-                &inlet_data
-                    .components
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>(),
+                &inlet_data.components.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
                 &inlet_data.composition,
             )
             .build()
@@ -261,6 +281,10 @@ impl ValveBuilder {
     }
 
     /// Sets the fluid for thermodynamic calculations.
+    ///
+    /// When set, the outlet temperature is computed from the isenthalpic
+    /// condition `h(T_out, P_out) = h(T_in, P_in)` using `props_ph`, rather
+    /// than the ideal-gas approximation `T_out = T_in`.
     #[cfg(feature = "thermodynamics")]
     pub fn with_fluid(mut self, fluid: impl Into<Fluid>) -> Self {
         self.fluid = Some(fluid.into());
@@ -292,10 +316,7 @@ mod tests {
 
     #[test]
     fn test_valve_equations() {
-        let mut valve = Valve::new("valve-1")
-            .with_pressure_drop(5e5)
-            .build()
-            .unwrap();
+        let mut valve = Valve::new("valve-1").with_pressure_drop(5e5).build().unwrap();
 
         let f: f64 = 5.0;
         let t_in: f64 = 350.0;
@@ -313,10 +334,7 @@ mod tests {
 
     #[test]
     fn test_valve_variable_counts() {
-        let valve = Valve::new("valve-1")
-            .with_pressure_drop(1e5)
-            .build()
-            .unwrap();
+        let valve = Valve::new("valve-1").with_pressure_drop(1e5).build().unwrap();
 
         assert_eq!(valve.n_variables(), 6);
         assert_eq!(valve.n_equations(), 3);
@@ -327,10 +345,7 @@ mod tests {
 
     #[test]
     fn test_valve_process() {
-        let mut valve = Valve::new("valve-1")
-            .with_pressure_drop(8e5)
-            .build()
-            .unwrap();
+        let mut valve = Valve::new("valve-1").with_pressure_drop(8e5).build().unwrap();
 
         let feed = Stream::<MassFlow>::new()
             .with_flow(5.0)
@@ -349,10 +364,7 @@ mod tests {
 
     #[test]
     fn test_valve_outlet_pressure_spec() {
-        let mut valve = Valve::new("valve-1")
-            .with_outlet_pressure(1e5)
-            .build()
-            .unwrap();
+        let mut valve = Valve::new("valve-1").with_outlet_pressure(1e5).build().unwrap();
 
         let feed = Stream::<MassFlow>::new()
             .with_flow(2.0)
@@ -368,4 +380,3 @@ mod tests {
         assert!((data.temperature - 400.0).abs() < 1e-10);
     }
 }
-

@@ -100,10 +100,10 @@ enum HexSpec {
 pub struct HeatExchanger {
     name: String,
     spec: HexSpec,
-    cp_hot: f64,   // J/(kg*K)
-    cp_cold: f64,  // J/(kg*K)
-    dp_hot: f64,   // Pa  (positive = pressure drop)
-    dp_cold: f64,  // Pa
+    cp_hot: f64,  // J/(kg*K)
+    cp_cold: f64, // J/(kg*K)
+    dp_hot: f64,  // Pa  (positive = pressure drop)
+    dp_cold: f64, // Pa
     #[cfg(feature = "thermodynamics")]
     hot_fluid: Option<Fluid>,
     #[cfg(feature = "thermodynamics")]
@@ -139,25 +139,9 @@ impl HeatExchanger {
     pub fn duty(&self) -> f64 {
         self.vars[HexVars::default().q]
     }
-}
 
-impl EquationModel for HeatExchanger {
-    fn n_variables(&self) -> usize {
-        13
-    }
-
-    fn n_equations(&self) -> usize {
-        7
-    }
-
-    fn variable_names(&self) -> Vec<&str> {
-        vec!["F_hi", "T_hi", "P_hi", "F_ho", "T_ho", "P_ho",
-             "F_ci", "T_ci", "P_ci", "F_co", "T_co", "P_co", "Q"]
-    }
-
-    fn residuals(&self, vars: &[f64]) -> Vec<f64> {
+    fn residuals_generic<S: crate::Scalar>(&self, vars: &[S]) -> Vec<S> {
         let i = HexVars::default();
-
         let f_hi = vars[i.f_hi];
         let t_hi = vars[i.t_hi];
         let p_hi = vars[i.p_hi];
@@ -172,26 +156,49 @@ impl EquationModel for HeatExchanger {
         let p_co = vars[i.p_co];
         let q = vars[i.q];
 
-        // 1. Hot mass balance
         let r1 = f_ho - f_hi;
-        // 2. Cold mass balance
         let r2 = f_co - f_ci;
-        // 3. Hot side energy: Q = F_hi * Cp_hot * (T_hi - T_ho)
         let r3 = q - f_hi * self.cp_hot * (t_hi - t_ho);
-        // 4. Cold side energy: Q = F_ci * Cp_cold * (T_co - T_ci)
         let r4 = q - f_ci * self.cp_cold * (t_co - t_ci);
-        // 5. Hot side pressure
         let r5 = p_ho - (p_hi - self.dp_hot);
-        // 6. Cold side pressure
         let r6 = p_co - (p_ci - self.dp_cold);
-        // 7. Closing specification
         let r7 = match self.spec {
-            HexSpec::HotOutletTemperature(t)  => t_ho - t,
+            HexSpec::HotOutletTemperature(t) => t_ho - t,
             HexSpec::ColdOutletTemperature(t) => t_co - t,
-            HexSpec::Duty(q_spec)             => q - q_spec,
+            HexSpec::Duty(q_spec) => q - q_spec,
         };
 
         vec![r1, r2, r3, r4, r5, r6, r7]
+    }
+}
+
+impl EquationModel for HeatExchanger {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn n_variables(&self) -> usize {
+        13
+    }
+
+    fn n_equations(&self) -> usize {
+        7
+    }
+
+    fn variable_names(&self) -> Vec<&str> {
+        vec![
+            "F_hi", "T_hi", "P_hi", "F_ho", "T_ho", "P_ho", "F_ci", "T_ci", "P_ci", "F_co", "T_co",
+            "P_co", "Q",
+        ]
+    }
+
+    fn residuals(&self, vars: &[f64]) -> Vec<f64> {
+        self.residuals_generic(vars)
+    }
+
+    #[cfg(feature = "autodiff")]
+    fn residuals_dual(&self, vars: &[num_dual::Dual64]) -> Vec<num_dual::Dual64> {
+        self.residuals_generic(vars)
     }
 
     fn get_variables(&self) -> Vec<f64> {
@@ -219,8 +226,8 @@ impl EquationModel for HeatExchanger {
 
     fn inlet_port_indices(&self, port: usize) -> Vec<usize> {
         match port {
-            0 => vec![0, 1, 2],  // hot inlet: F_hi, T_hi, P_hi
-            1 => vec![6, 7, 8],  // cold inlet: F_ci, T_ci, P_ci
+            0 => vec![0, 1, 2], // hot inlet: F_hi, T_hi, P_hi
+            1 => vec![6, 7, 8], // cold inlet: F_ci, T_ci, P_ci
             _ => vec![],
         }
     }
@@ -256,12 +263,31 @@ impl Process for HeatExchanger {
         self.vars[i.t_ci] = ci.temperature;
         self.vars[i.p_ci] = ci.pressure;
 
+        // Resolve cp values: use thermodynamic properties if fluids are set.
+        #[cfg(feature = "thermodynamics")]
+        let cp_hot = if let Some(ref fluid) = self.hot_fluid {
+            fluid.props_pt(hi.pressure, hi.temperature).map(|p| p.cp).unwrap_or(self.cp_hot)
+        } else {
+            self.cp_hot
+        };
+        #[cfg(not(feature = "thermodynamics"))]
+        let cp_hot = self.cp_hot;
+
+        #[cfg(feature = "thermodynamics")]
+        let cp_cold = if let Some(ref fluid) = self.cold_fluid {
+            fluid.props_pt(ci.pressure, ci.temperature).map(|p| p.cp).unwrap_or(self.cp_cold)
+        } else {
+            self.cp_cold
+        };
+        #[cfg(not(feature = "thermodynamics"))]
+        let cp_cold = self.cp_cold;
+
         // Calculate Q and outlet temperatures from the specification
         let (q, t_ho, t_co) = match self.spec {
             HexSpec::HotOutletTemperature(t_ho_spec) => {
-                let q = hi.flow * self.cp_hot * (hi.temperature - t_ho_spec);
-                let dt_cold = if ci.flow * self.cp_cold > 1e-15 {
-                    q / (ci.flow * self.cp_cold)
+                let q = hi.flow * cp_hot * (hi.temperature - t_ho_spec);
+                let dt_cold = if ci.flow * cp_cold > 1e-15 {
+                    q / (ci.flow * cp_cold)
                 } else {
                     return Err(NomataError::Configuration(
                         "HeatExchanger cold side flow is zero".to_string(),
@@ -270,9 +296,9 @@ impl Process for HeatExchanger {
                 (q, t_ho_spec, ci.temperature + dt_cold)
             }
             HexSpec::ColdOutletTemperature(t_co_spec) => {
-                let q = ci.flow * self.cp_cold * (t_co_spec - ci.temperature);
-                let dt_hot = if hi.flow * self.cp_hot > 1e-15 {
-                    q / (hi.flow * self.cp_hot)
+                let q = ci.flow * cp_cold * (t_co_spec - ci.temperature);
+                let dt_hot = if hi.flow * cp_hot > 1e-15 {
+                    q / (hi.flow * cp_hot)
                 } else {
                     return Err(NomataError::Configuration(
                         "HeatExchanger hot side flow is zero".to_string(),
@@ -281,15 +307,15 @@ impl Process for HeatExchanger {
                 (q, hi.temperature - dt_hot, t_co_spec)
             }
             HexSpec::Duty(q_spec) => {
-                let dt_hot = if hi.flow * self.cp_hot > 1e-15 {
-                    q_spec / (hi.flow * self.cp_hot)
+                let dt_hot = if hi.flow * cp_hot > 1e-15 {
+                    q_spec / (hi.flow * cp_hot)
                 } else {
                     return Err(NomataError::Configuration(
                         "HeatExchanger hot side flow is zero".to_string(),
                     ));
                 };
-                let dt_cold = if ci.flow * self.cp_cold > 1e-15 {
-                    q_spec / (ci.flow * self.cp_cold)
+                let dt_cold = if ci.flow * cp_cold > 1e-15 {
+                    q_spec / (ci.flow * cp_cold)
                 } else {
                     return Err(NomataError::Configuration(
                         "HeatExchanger cold side flow is zero".to_string(),
@@ -403,14 +429,20 @@ impl HeatExchangerBuilder {
         self
     }
 
-    /// Sets the hot-side fluid for thermodynamic calculations.
+    /// Sets the hot-side fluid for thermodynamic Cp lookups.
+    ///
+    /// When set, the hot-side heat capacity is taken from `fluid.props_pt` at
+    /// the inlet conditions rather than the fixed `cp_hot` value.
     #[cfg(feature = "thermodynamics")]
     pub fn with_hot_fluid(mut self, fluid: impl Into<Fluid>) -> Self {
         self.hot_fluid = Some(fluid.into());
         self
     }
 
-    /// Sets the cold-side fluid for thermodynamic calculations.
+    /// Sets the cold-side fluid for thermodynamic Cp lookups.
+    ///
+    /// When set, the cold-side heat capacity is taken from `fluid.props_pt` at
+    /// the inlet conditions rather than the fixed `cp_cold` value.
     #[cfg(feature = "thermodynamics")]
     pub fn with_cold_fluid(mut self, fluid: impl Into<Fluid>) -> Self {
         self.cold_fluid = Some(fluid.into());
@@ -465,10 +497,7 @@ mod tests {
 
     #[test]
     fn test_hex_variable_counts() {
-        let hex = HeatExchanger::new("hex")
-            .with_hot_outlet_temperature(380.0)
-            .build()
-            .unwrap();
+        let hex = HeatExchanger::new("hex").with_hot_outlet_temperature(380.0).build().unwrap();
 
         assert_eq!(hex.n_variables(), 13);
         assert_eq!(hex.n_equations(), 7);
@@ -501,8 +530,9 @@ mod tests {
             .build()
             .unwrap();
 
-        hex.set_variables(&[f_hi, t_hi, p_hi, f_hi, t_ho, p_hi,
-                             f_ci, t_ci, p_ci, f_ci, t_co, p_ci, q]);
+        hex.set_variables(&[
+            f_hi, t_hi, p_hi, f_hi, t_ho, p_hi, f_ci, t_ci, p_ci, f_ci, t_co, p_ci, q,
+        ]);
 
         let res = hex.residuals(&hex.get_variables());
         for (k, r) in res.iter().enumerate() {

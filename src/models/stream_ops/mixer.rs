@@ -70,10 +70,7 @@ pub struct Mixer<const N: usize, F: FlowBasis = MassFlow> {
 impl<const N: usize, F: FlowBasis> Mixer<N, F> {
     /// Creates a new mixer builder with N inlets.
     pub fn new(name: &str) -> MixerBuilder<N, F> {
-        MixerBuilder {
-            name: name.to_string(),
-            _marker: std::marker::PhantomData,
-        }
+        MixerBuilder { name: name.to_string(), _marker: std::marker::PhantomData }
     }
 
     /// Gets the mixer name.
@@ -85,9 +82,53 @@ impl<const N: usize, F: FlowBasis> Mixer<N, F> {
     const fn n_vars() -> usize {
         N * 3 + 3
     }
+
+    fn residuals_generic<S: crate::Scalar>(&self, vars: &[S]) -> Vec<S> {
+        let mut total_flow = S::from(0.0);
+        let mut flow_temp_sum = S::from(0.0);
+
+        // Minimum pressure is computed from the stored f64 values (inlets are specified).
+        let mut min_pressure_f64 = f64::INFINITY;
+        for i in 0..N {
+            let p = self.vars[i * 3 + 2];
+            if p < min_pressure_f64 {
+                min_pressure_f64 = p;
+            }
+        }
+
+        for i in 0..N {
+            let f = vars[i * 3];
+            let t = vars[i * 3 + 1];
+            total_flow = total_flow + f;
+            flow_temp_sum = flow_temp_sum + f * t;
+        }
+
+        let out_base = N * 3;
+        let f_out = vars[out_base];
+        let t_out = vars[out_base + 1];
+        let p_out = vars[out_base + 2];
+
+        let r1 = f_out - total_flow;
+
+        // Use f64 snapshot of total_flow for branch condition.
+        let total_flow_f64: f64 = (0..N).map(|i| self.vars[i * 3]).sum();
+        let r2 = if total_flow_f64.abs() > 1e-10 {
+            f_out * t_out - flow_temp_sum
+        } else {
+            t_out - 298.15_f64
+        };
+
+        let r3 = p_out - min_pressure_f64;
+
+        vec![r1, r2, r3]
+    }
 }
 
 impl<const N: usize, F: FlowBasis> EquationModel for Mixer<N, F> {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
     fn n_variables(&self) -> usize {
         Self::n_vars()
     }
@@ -100,9 +141,27 @@ impl<const N: usize, F: FlowBasis> EquationModel for Mixer<N, F> {
     fn variable_names(&self) -> Vec<&str> {
         let mut names = Vec::with_capacity(Self::n_vars());
         for i in 0..N {
-            names.push(if i == 0 { "F_in1" } else if i == 1 { "F_in2" } else { "F_inN" });
-            names.push(if i == 0 { "T_in1" } else if i == 1 { "T_in2" } else { "T_inN" });
-            names.push(if i == 0 { "P_in1" } else if i == 1 { "P_in2" } else { "P_inN" });
+            names.push(if i == 0 {
+                "F_in1"
+            } else if i == 1 {
+                "F_in2"
+            } else {
+                "F_inN"
+            });
+            names.push(if i == 0 {
+                "T_in1"
+            } else if i == 1 {
+                "T_in2"
+            } else {
+                "T_inN"
+            });
+            names.push(if i == 0 {
+                "P_in1"
+            } else if i == 1 {
+                "P_in2"
+            } else {
+                "P_inN"
+            });
         }
         names.push("F_out");
         names.push("T_out");
@@ -111,37 +170,12 @@ impl<const N: usize, F: FlowBasis> EquationModel for Mixer<N, F> {
     }
 
     fn residuals(&self, vars: &[f64]) -> Vec<f64> {
-        // Extract inlet flows, temps, pressures
-        let mut total_flow = 0.0;
-        let mut flow_temp_sum = 0.0;
-        let mut min_pressure = f64::INFINITY;
+        self.residuals_generic(vars)
+    }
 
-        for i in 0..N {
-            let f = vars[i * 3];
-            let t = vars[i * 3 + 1];
-            let p = vars[i * 3 + 2];
-            total_flow += f;
-            flow_temp_sum += f * t;
-            if p < min_pressure {
-                min_pressure = p;
-            }
-        }
-
-        let out_base = N * 3;
-        let f_out = vars[out_base];
-        let t_out = vars[out_base + 1];
-        let p_out = vars[out_base + 2];
-
-        // Residuals
-        let r1 = f_out - total_flow; // Mass balance
-        let r2 = if total_flow.abs() > 1e-10 {
-            f_out * t_out - flow_temp_sum // Energy balance (simplified)
-        } else {
-            t_out - 298.15 // Default temperature if no flow
-        };
-        let r3 = p_out - min_pressure; // Pressure = minimum inlet pressure
-
-        vec![r1, r2, r3]
+    #[cfg(feature = "autodiff")]
+    fn residuals_dual(&self, vars: &[num_dual::Dual64]) -> Vec<num_dual::Dual64> {
+        self.residuals_generic(vars)
     }
 
     fn get_variables(&self) -> Vec<f64> {
@@ -187,17 +221,11 @@ impl<const N: usize, F: FlowBasis> Process for Mixer<N, F> {
         let total_flow: f64 = inputs.iter().map(|s| s.flow()).sum();
 
         // Temperature: flow-weighted average
-        let total_temp: f64 = inputs
-            .iter()
-            .map(|s| s.flow() * s.temperature())
-            .sum::<f64>()
-            / total_flow;
+        let total_temp: f64 =
+            inputs.iter().map(|s| s.flow() * s.temperature()).sum::<f64>() / total_flow;
 
         // Pressure: minimum of all inlets (isobaric mixing at lowest pressure)
-        let min_pressure: f64 = inputs
-            .iter()
-            .map(|s| s.pressure())
-            .fold(f64::INFINITY, f64::min);
+        let min_pressure: f64 = inputs.iter().map(|s| s.pressure()).fold(f64::INFINITY, f64::min);
 
         // For composition, we need to collect all unique components
         // and compute flow-weighted mole fractions
@@ -211,11 +239,7 @@ impl<const N: usize, F: FlowBasis> Process for Mixer<N, F> {
             .with_temperature(total_temp)
             .with_pressure(min_pressure)
             .with_composition(
-                &first_data
-                    .components
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>(),
+                &first_data.components.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
                 &first_data.composition,
             )
             .build()

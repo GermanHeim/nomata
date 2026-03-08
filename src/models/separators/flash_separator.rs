@@ -59,7 +59,7 @@ pub struct FlashSeparator {
     name: String,
     k_values: Vec<f64>,
     feed_composition: Vec<f64>,
-    
+
     // EO variables: [F_in, T_in, P_in, F_vap, T_vap, P_vap, F_liq, T_liq, P_liq, psi]
     vars: [f64; 10],
 
@@ -85,9 +85,15 @@ struct FlashVars {
 impl Default for FlashVars {
     fn default() -> Self {
         Self {
-            f_in: 0, t_in: 1, p_in: 2,
-            f_vap: 3, t_vap: 4, p_vap: 5,
-            f_liq: 6, t_liq: 7, p_liq: 8,
+            f_in: 0,
+            t_in: 1,
+            p_in: 2,
+            f_vap: 3,
+            t_vap: 4,
+            p_vap: 5,
+            f_liq: 6,
+            t_liq: 7,
+            p_liq: 8,
             psi: 9,
         }
     }
@@ -102,106 +108,106 @@ impl FlashSeparator {
             feed_composition: Vec::new(),
         }
     }
-    
+
     /// Gets the flash separator name.
     pub fn name(&self) -> &str {
         &self.name
     }
-    
+
     /// Gets the vapor fraction after calculation.
     pub fn vapor_fraction(&self) -> f64 {
         let idx = FlashVars::default();
         self.vars[idx.psi]
     }
-    
+
     /// Gets the liquid composition after calculation.
     pub fn liquid_composition(&self) -> &[f64] {
         &self.liquid_composition
     }
-    
+
     /// Gets the vapor composition after calculation.
     pub fn vapor_composition(&self) -> &[f64] {
         &self.vapor_composition
     }
-    
+
     /// Gets the K-values.
     pub fn k_values(&self) -> &[f64] {
         &self.k_values
     }
-    
+
     /// Gets feed flow.
     pub fn feed_flow(&self) -> f64 {
         self.vars[FlashVars::default().f_in]
     }
-    
+
     /// Gets feed temperature.
     pub fn feed_temperature(&self) -> f64 {
         self.vars[FlashVars::default().t_in]
     }
-    
+
     /// Gets feed pressure.
     pub fn feed_pressure(&self) -> f64 {
         self.vars[FlashVars::default().p_in]
     }
-    
+
     /// Performs Rachford-Rice flash calculation.
     fn flash_calculation(&mut self, feed_composition: &[f64]) {
         let n = feed_composition.len();
         if n == 0 || self.k_values.len() != n {
             return;
         }
-        
+
         // Initial guess for vapor fraction
         let mut psi = 0.5;
         let idx = FlashVars::default();
-        
+
         // Rachford-Rice iteration
         for _ in 0..50 {
             let mut f = 0.0;
             let mut df = 0.0;
-            
+
             for i in 0..n {
                 let k = self.k_values[i];
                 let z = feed_composition[i];
                 let km1 = k - 1.0;
                 let denom = 1.0 + psi * km1;
-                
+
                 f += z * km1 / denom;
                 df -= z * km1 * km1 / (denom * denom);
             }
-            
+
             if f.abs() < 1e-10 {
                 break;
             }
-            
+
             // Newton step
             let dpsi = -f / df;
             psi += dpsi;
             psi = psi.clamp(0.0, 1.0);
-            
+
             if dpsi.abs() < 1e-12 {
                 break;
             }
         }
-        
+
         self.vars[idx.psi] = psi;
-        
+
         // Update outlet flows based on vapor fraction
         let f_in = self.vars[idx.f_in];
         self.vars[idx.f_vap] = f_in * psi;
         self.vars[idx.f_liq] = f_in * (1.0 - psi);
-        
+
         // Compute compositions
         self.liquid_composition = vec![0.0; n];
         self.vapor_composition = vec![0.0; n];
-        
+
         for i in 0..n {
             let k = self.k_values[i];
             let z = feed_composition[i];
-            
+
             let x = z / (1.0 + psi * (k - 1.0));
             let y = k * x;
-            
+
             self.liquid_composition[i] = x;
             self.vapor_composition[i] = y;
         }
@@ -211,23 +217,53 @@ impl FlashSeparator {
     ///
     /// This is the core algebraic equation: sum_i [ z_i * (K_i - 1) / (1 + psi * (K_i - 1)) ] = 0
     pub fn rachford_rice_residual(&self, psi: f64) -> f64 {
-        if self.feed_composition.is_empty() || self.k_values.len() != self.feed_composition.len() {
-            return 0.0;
-        }
+        self.rachford_rice_residual_generic(psi)
+    }
 
-        let mut f = 0.0;
+    fn rachford_rice_residual_generic<S: crate::Scalar>(&self, psi: S) -> S {
+        if self.feed_composition.is_empty() || self.k_values.len() != self.feed_composition.len() {
+            return S::from(0.0);
+        }
+        let mut f = S::from(0.0);
         for i in 0..self.feed_composition.len() {
             let k = self.k_values[i];
             let z = self.feed_composition[i];
             let km1 = k - 1.0;
-            let denom = 1.0 + psi * km1;
-            f += z * km1 / denom;
+            let denom = psi * km1 + 1.0_f64;
+            f = f + S::from(z * km1) / denom;
         }
         f
+    }
+
+    fn residuals_generic<S: crate::Scalar>(&self, vars: &[S]) -> Vec<S> {
+        let f_in = vars[0];
+        let t_in = vars[1];
+        let p_in = vars[2];
+        let f_vap = vars[3];
+        let t_vap = vars[4];
+        let p_vap = vars[5];
+        let f_liq = vars[6];
+        let t_liq = vars[7];
+        let p_liq = vars[8];
+        let psi = vars[9];
+
+        vec![
+            self.rachford_rice_residual_generic(psi),
+            f_vap - psi * f_in,
+            f_liq - (S::from(1.0) - psi) * f_in,
+            t_vap - t_in,
+            t_liq - t_in,
+            p_vap - p_in,
+            p_liq - p_in,
+        ]
     }
 }
 
 impl EquationModel for FlashSeparator {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
     fn n_variables(&self) -> usize {
         // Variables: F_in, T_in, P_in, F_vap, T_vap, P_vap, F_liq, T_liq, P_liq, psi
         10
@@ -249,26 +285,12 @@ impl EquationModel for FlashSeparator {
     }
 
     fn residuals(&self, vars: &[f64]) -> Vec<f64> {
-        let f_in = vars[0];
-        let t_in = vars[1];
-        let p_in = vars[2];
-        let f_vap = vars[3];
-        let t_vap = vars[4];
-        let p_vap = vars[5];
-        let f_liq = vars[6];
-        let t_liq = vars[7];
-        let p_liq = vars[8];
-        let psi = vars[9];
+        self.residuals_generic(vars)
+    }
 
-        vec![
-            self.rachford_rice_residual(psi),  // Rachford-Rice
-            f_vap - psi * f_in,                // Vapor flow
-            f_liq - (1.0 - psi) * f_in,        // Liquid flow
-            t_vap - t_in,                      // Vapor temp = inlet temp
-            t_liq - t_in,                      // Liquid temp = inlet temp
-            p_vap - p_in,                      // Vapor pressure = inlet pressure
-            p_liq - p_in,                      // Liquid pressure = inlet pressure
-        ]
+    #[cfg(feature = "autodiff")]
+    fn residuals_dual(&self, vars: &[num_dual::Dual64]) -> Vec<num_dual::Dual64> {
+        self.residuals_generic(vars)
     }
 
     fn get_variables(&self) -> Vec<f64> {
@@ -279,7 +301,7 @@ impl EquationModel for FlashSeparator {
         for (i, &v) in vars.iter().enumerate().take(10) {
             self.vars[i] = v;
         }
-        
+
         // Clamp psi to [0, 1]
         let idx = FlashVars::default();
         self.vars[idx.psi] = self.vars[idx.psi].clamp(0.0, 1.0);
@@ -312,7 +334,7 @@ impl EquationModel for FlashSeparator {
     }
 
     fn n_outlet_ports(&self) -> usize {
-        2  // Vapor (port 0) and Liquid (port 1)
+        2 // Vapor (port 0) and Liquid (port 1)
     }
 
     fn inlet_port_indices(&self, _port: usize) -> Vec<usize> {
@@ -321,9 +343,9 @@ impl EquationModel for FlashSeparator {
 
     fn outlet_port_indices(&self, port: usize) -> Vec<usize> {
         match port {
-            0 => vec![3, 4, 5],   // Vapor outlet
-            1 => vec![6, 7, 8],   // Liquid outlet
-            _ => vec![3, 4, 5],   // Default to vapor
+            0 => vec![3, 4, 5], // Vapor outlet
+            1 => vec![6, 7, 8], // Liquid outlet
+            _ => vec![3, 4, 5], // Default to vapor
         }
     }
 }
@@ -376,7 +398,7 @@ impl Process for FlashSeparator {
         self.vars[idx.t_liq] = data.temperature;
         self.vars[idx.p_vap] = data.pressure;
         self.vars[idx.p_liq] = data.pressure;
-        
+
         // Build vapor stream
         let vapor = Stream::<MolarFlow>::new()
             .with_flow(vapor_flow)
@@ -387,7 +409,7 @@ impl Process for FlashSeparator {
                 &self.vapor_composition,
             )
             .build()?;
-        
+
         // Build liquid stream
         let liquid = Stream::<MolarFlow>::new()
             .with_flow(liquid_flow)
@@ -398,7 +420,7 @@ impl Process for FlashSeparator {
                 &self.liquid_composition,
             )
             .build()?;
-        
+
         Ok(FlashOutput { vapor, liquid })
     }
 }
@@ -417,19 +439,19 @@ impl FlashSeparatorBuilder {
         self.k_values = k_values.to_vec();
         self
     }
-    
+
     /// Sets the feed composition (mole fractions, must sum to 1.0).
     pub fn with_feed_composition(mut self, composition: &[f64]) -> Self {
         self.feed_composition = composition.to_vec();
         self
     }
-    
+
     /// Builds the flash separator.
     pub fn build(self) -> NomataResult<FlashSeparator> {
         // Initialize vars with psi = 0.5 initial guess
         let mut vars = [0.0; 10];
         vars[FlashVars::default().psi] = 0.5;
-        
+
         Ok(FlashSeparator {
             name: self.name,
             k_values: self.k_values,

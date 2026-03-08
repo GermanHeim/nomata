@@ -59,15 +59,7 @@ struct PumpVars {
 
 impl Default for PumpVars {
     fn default() -> Self {
-        PumpVars {
-            f_in: 0,
-            t_in: 1,
-            p_in: 2,
-            f_out: 3,
-            t_out: 4,
-            p_out: 5,
-            work: 6,
-        }
+        PumpVars { f_in: 0, t_in: 1, p_in: 2, f_out: 3, t_out: 4, p_out: 5, work: 6 }
     }
 }
 
@@ -129,9 +121,48 @@ impl Pump {
     pub fn pressure_rise_spec(&self) -> Option<f64> {
         self.pressure_rise
     }
+
+    fn residuals_generic<S: crate::Scalar>(&self, vars: &[S]) -> Vec<S> {
+        let idx = PumpVars::default();
+        let f_in = vars[idx.f_in];
+        let t_in = vars[idx.t_in];
+        let p_in = vars[idx.p_in];
+        let f_out = vars[idx.f_out];
+        let t_out = vars[idx.t_out];
+        let p_out = vars[idx.p_out];
+        let w = vars[idx.work];
+
+        let dp = p_out - p_in;
+
+        let r1 = f_out - f_in;
+
+        let r2 = if let Some(p_spec) = self.outlet_pressure {
+            p_out - p_spec
+        } else if let Some(dp_spec) = self.pressure_rise {
+            dp - dp_spec
+        } else {
+            S::from(0.0)
+        };
+
+        // Use stored f64 values for branch conditions (specified inlets are fixed).
+        let f_in_f64 = self.vars[idx.f_in];
+        let (r3, r4) = if f_in_f64.abs() > 1e-10 {
+            let expected_work = f_in * dp / self.density / self.efficiency;
+            let expected_t_out = t_in + w / f_in / self.heat_capacity;
+            (w - expected_work, t_out - expected_t_out)
+        } else {
+            (w, t_out - t_in)
+        };
+
+        vec![r1, r2, r3, r4]
+    }
 }
 
 impl EquationModel for Pump {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
     fn n_variables(&self) -> usize {
         7
     }
@@ -145,48 +176,12 @@ impl EquationModel for Pump {
     }
 
     fn residuals(&self, vars: &[f64]) -> Vec<f64> {
-        let idx = PumpVars::default();
-        let f_in = vars[idx.f_in];
-        let t_in = vars[idx.t_in];
-        let p_in = vars[idx.p_in];
-        let f_out = vars[idx.f_out];
-        let t_out = vars[idx.t_out];
-        let p_out = vars[idx.p_out];
-        let w = vars[idx.work];
+        self.residuals_generic(vars)
+    }
 
-        let dp = p_out - p_in;
-
-        // Equation 1: Mass balance
-        let r1 = f_out - f_in;
-
-        // Equation 2: Pressure specification
-        let r2 = if let Some(p_spec) = self.outlet_pressure {
-            p_out - p_spec
-        } else if let Some(dp_spec) = self.pressure_rise {
-            dp - dp_spec
-        } else {
-            0.0 // Should not happen if validated
-        };
-
-        // Equation 3: Work equation
-        // W = F_in * dP / (rho * eta)
-        let expected_work = if f_in.abs() > 1e-10 {
-            f_in * dp / (self.density * self.efficiency)
-        } else {
-            0.0
-        };
-        let r3 = w - expected_work;
-
-        // Equation 4: Temperature rise
-        // T_out = T_in + W / (F_in * Cp)
-        let expected_t_out = if f_in.abs() > 1e-10 {
-            t_in + w / (f_in * self.heat_capacity)
-        } else {
-            t_in
-        };
-        let r4 = t_out - expected_t_out;
-
-        vec![r1, r2, r3, r4]
+    #[cfg(feature = "autodiff")]
+    fn residuals_dual(&self, vars: &[num_dual::Dual64]) -> Vec<num_dual::Dual64> {
+        self.residuals_generic(vars)
     }
 
     fn get_variables(&self) -> Vec<f64> {
@@ -214,11 +209,11 @@ impl EquationModel for Pump {
     }
 
     fn inlet_port_indices(&self, _port: usize) -> Vec<usize> {
-        vec![0, 1, 2]  // F_in, T_in, P_in
+        vec![0, 1, 2] // F_in, T_in, P_in
     }
 
     fn outlet_port_indices(&self, _port: usize) -> Vec<usize> {
-        vec![3, 4, 5]  // F_out, T_out, P_out
+        vec![3, 4, 5] // F_out, T_out, P_out
     }
 }
 
@@ -285,11 +280,7 @@ impl Process for Pump {
             .with_temperature(outlet_temperature)
             .with_pressure(p_out)
             .with_composition(
-                &inlet_data
-                    .components
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>(),
+                &inlet_data.components.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
                 &inlet_data.composition,
             )
             .build()
@@ -374,11 +365,8 @@ mod tests {
 
     #[test]
     fn test_pump_builder() {
-        let pump = Pump::new("pump-1")
-            .with_efficiency(0.8)
-            .with_outlet_pressure(5e5)
-            .build()
-            .unwrap();
+        let pump =
+            Pump::new("pump-1").with_efficiency(0.8).with_outlet_pressure(5e5).build().unwrap();
 
         assert_eq!(pump.name(), "pump-1");
         assert_eq!(pump.efficiency(), 0.8);
@@ -394,11 +382,8 @@ mod tests {
             .build()
             .unwrap();
 
-        let mut pump = Pump::new("pump-1")
-            .with_efficiency(0.75)
-            .with_outlet_pressure(5e5)
-            .build()
-            .unwrap();
+        let mut pump =
+            Pump::new("pump-1").with_efficiency(0.75).with_outlet_pressure(5e5).build().unwrap();
 
         let outlet = pump.process(feed).unwrap();
 
@@ -418,11 +403,8 @@ mod tests {
 
     #[test]
     fn test_pump_equations() {
-        let mut pump = Pump::new("pump-1")
-            .with_efficiency(0.75)
-            .with_outlet_pressure(5e5)
-            .build()
-            .unwrap();
+        let mut pump =
+            Pump::new("pump-1").with_efficiency(0.75).with_outlet_pressure(5e5).build().unwrap();
 
         // Set up a valid solution point
         let f = 10.0; // kg/s
@@ -442,21 +424,13 @@ mod tests {
 
         // All residuals should be zero at solution
         for (i, r) in residuals.iter().enumerate() {
-            assert!(
-                r.abs() < 1e-10,
-                "Residual {} = {} (should be 0)",
-                i,
-                r
-            );
+            assert!(r.abs() < 1e-10, "Residual {} = {} (should be 0)", i, r);
         }
     }
 
     #[test]
     fn test_pump_variable_counts() {
-        let pump = Pump::new("pump-1")
-            .with_outlet_pressure(5e5)
-            .build()
-            .unwrap();
+        let pump = Pump::new("pump-1").with_outlet_pressure(5e5).build().unwrap();
 
         assert_eq!(pump.n_variables(), 7);
         assert_eq!(pump.n_equations(), 4);

@@ -436,6 +436,18 @@ impl Default for SteadyStateSolver {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct UnitId(pub usize);
 
+impl UnitId {
+    /// Returns an outlet port reference for this unit.
+    pub fn outlet(self, port: usize) -> OutletPort {
+        OutletPort { unit_id: self, port }
+    }
+
+    /// Returns an inlet port reference for this unit.
+    pub fn inlet(self, port: usize) -> InletPort {
+        InletPort { unit_id: self, port }
+    }
+}
+
 /// Typed identifier for a connection in an EOFlowsheet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ConnectionId(pub usize);
@@ -476,6 +488,46 @@ pub struct InletPort {
     pub port: usize,
 }
 
+/// Converts a type into an outlet specification (unit id + port index).
+///
+/// Implemented for [`UnitId`] (defaults to port 0) and [`OutletPort`].
+pub trait IntoOutletSpec {
+    /// Converts self into a (UnitId, port) pair.
+    fn into_outlet_spec(self) -> (UnitId, usize);
+}
+
+impl IntoOutletSpec for UnitId {
+    fn into_outlet_spec(self) -> (UnitId, usize) {
+        (self, 0)
+    }
+}
+
+impl IntoOutletSpec for OutletPort {
+    fn into_outlet_spec(self) -> (UnitId, usize) {
+        (self.unit_id, self.port)
+    }
+}
+
+/// Converts a type into an inlet specification (unit id + port index).
+///
+/// Implemented for [`UnitId`] (defaults to port 0) and [`InletPort`].
+pub trait IntoInletSpec {
+    /// Converts self into a (UnitId, port) pair.
+    fn into_inlet_spec(self) -> (UnitId, usize);
+}
+
+impl IntoInletSpec for UnitId {
+    fn into_inlet_spec(self) -> (UnitId, usize) {
+        (self, 0)
+    }
+}
+
+impl IntoInletSpec for InletPort {
+    fn into_inlet_spec(self) -> (UnitId, usize) {
+        (self.unit_id, self.port)
+    }
+}
+
 /// Object-safe wrapper for [`EquationModel`].
 ///
 /// This trait mirrors `EquationModel` but is dyn-compatible, enabling
@@ -495,6 +547,12 @@ pub trait EquationModelDyn {
     fn set_variables(&mut self, vars: &[f64]);
     /// Returns indices of variables that are free (to be solved).
     fn free_indices(&self) -> Vec<usize>;
+    /// Returns the name of this unit operation.
+    fn unit_name(&self) -> &str;
+    /// Returns inlet port variable indices for the given port number.
+    fn inlet_port_indices_dyn(&self, port: usize) -> Vec<usize>;
+    /// Returns outlet port variable indices for the given port number.
+    fn outlet_port_indices_dyn(&self, port: usize) -> Vec<usize>;
     /// Returns the outlet stream values (flow, temp, pressure) for port 0.
     fn get_outlet(&self) -> (f64, f64, f64) {
         let vars = self.get_variables();
@@ -533,6 +591,15 @@ impl<T: EquationModel> EquationModelDyn for T {
     }
     fn free_indices(&self) -> Vec<usize> {
         EquationModel::free_indices(self)
+    }
+    fn unit_name(&self) -> &str {
+        EquationModel::name(self)
+    }
+    fn inlet_port_indices_dyn(&self, port: usize) -> Vec<usize> {
+        EquationModel::inlet_port_indices(self, port)
+    }
+    fn outlet_port_indices_dyn(&self, port: usize) -> Vec<usize> {
+        EquationModel::outlet_port_indices(self, port)
     }
     #[cfg(feature = "autodiff")]
     fn residuals_dual(&self, vars: &[num_dual::Dual64]) -> Vec<num_dual::Dual64> {
@@ -711,9 +778,10 @@ impl EOFlowsheet {
     }
 
     /// Adds a unit to the flowsheet and returns its [`UnitId`].
-    pub fn add<M: EquationModel + 'static>(&mut self, name: &str, unit: M) -> UnitId {
+    pub fn add<M: EquationModel + 'static>(&mut self, unit: M) -> UnitId {
         let id = UnitId(self.units.len());
-        self.units.push((name.to_string(), Box::new(unit)));
+        let name = unit.name().to_string();
+        self.units.push((name, Box::new(unit)));
         id
     }
 
@@ -735,25 +803,71 @@ impl EOFlowsheet {
         unit_eqs + conn_eqs
     }
 
-    /// Connects the outlet variables of `src` to the inlet variables of `dst`.
+    /// Connects the outlet port of `src` to the inlet port of `dst`.
     ///
-    /// `src_vars` and `dst_vars` list the variable indices (within each unit's
-    /// own variable vector) that should be equated.
-    pub fn connect(
-        &mut self,
-        src: UnitId,
-        src_vars: Vec<usize>,
-        dst: UnitId,
-        dst_vars: Vec<usize>,
-    ) -> ConnectionId {
+    /// Accepts [`UnitId`] (port 0) or [`OutletPort`]/[`InletPort`] for multi-port units.
+    /// Returns a [`ConnectionId`] that can be used to query the stream after solving.
+    pub fn connect<S: IntoOutletSpec, D: IntoInletSpec>(&mut self, src: S, dst: D) -> ConnectionId {
+        let (src_unit, src_port) = src.into_outlet_spec();
+        let (dst_unit, dst_port) = dst.into_inlet_spec();
+        let src_vars = self.units[src_unit.0].1.outlet_port_indices_dyn(src_port);
+        let dst_vars = self.units[dst_unit.0].1.inlet_port_indices_dyn(dst_port);
         let id = ConnectionId(self.connections.len());
-        self.connections.push((src.0, src_vars, dst.0, dst_vars));
+        self.connections.push((src_unit.0, src_vars, dst_unit.0, dst_vars));
         id
     }
 
-    /// Sets feed stream values for a unit.
+    /// Pins the inlet of `unit` to the given stream values.
+    ///
+    /// The solver will keep these variables fixed throughout the solve.
+    pub fn feed<F: crate::FlowBasis>(&mut self, unit: UnitId, stream: &crate::Stream<F>) {
+        let inlet_indices = self.units[unit.0].1.inlet_port_indices_dyn(0);
+        self.feeds.push((unit.0, inlet_indices, vec![stream.flow(), stream.temperature(), stream.pressure()]));
+    }
+
+    /// Sets initial guess values for the outlet of a unit or port.
+    ///
+    /// Accepts [`UnitId`] (port 0) or [`OutletPort`] for multi-port units.
+    pub fn set_initial_values<S: IntoOutletSpec>(&mut self, spec: S, flow: f64, temperature: f64, pressure: f64) {
+        let (unit, port) = spec.into_outlet_spec();
+        let outlet_indices = self.units[unit.0].1.outlet_port_indices_dyn(port);
+        let mut vars = self.units[unit.0].1.get_variables();
+        if outlet_indices.len() >= 3 {
+            vars[outlet_indices[0]] = flow;
+            vars[outlet_indices[1]] = temperature;
+            vars[outlet_indices[2]] = pressure;
+        }
+        self.units[unit.0].1.set_variables(&vars);
+    }
+
+    /// Returns stream data for a connection after the flowsheet has been solved.
+    pub fn stream(&self, conn_id: ConnectionId) -> StreamData {
+        let (src_idx, src_vars, _, _) = &self.connections[conn_id.0];
+        let vars = self.units[*src_idx].1.get_variables();
+        StreamData {
+            flow: src_vars.first().map(|&i| vars[i]).unwrap_or(0.0),
+            temperature: src_vars.get(1).map(|&i| vars[i]).unwrap_or(0.0),
+            pressure: src_vars.get(2).map(|&i| vars[i]).unwrap_or(0.0),
+        }
+    }
+
+    /// Prints a human-readable summary of the flowsheet structure.
+    pub fn summary(&self) {
+        println!("EOFlowsheet: {} units, {} connections, {} feeds",
+            self.units.len(), self.connections.len(), self.feeds.len());
+        for (i, (name, unit)) in self.units.iter().enumerate() {
+            println!("  [{}] {} - {} vars, {} eqs", i, name, unit.n_variables(), unit.n_equations());
+        }
+        for (i, (src_idx, src_vars, dst_idx, _)) in self.connections.iter().enumerate() {
+            println!("  Connection {}: {} -> {} ({} stream vars)",
+                i, self.units[*src_idx].0, self.units[*dst_idx].0, src_vars.len());
+        }
+    }
+
+    /// Sets feed stream values for a unit by explicit variable indices.
     ///
     /// The solver will fix these variables at the given values throughout the solve.
+    /// Prefer [`EOFlowsheet::feed`] for stream-typed feeds.
     pub fn set_feed(&mut self, unit: UnitId, var_indices: Vec<usize>, values: Vec<f64>) {
         self.feeds.push((unit.0, var_indices, values));
     }
@@ -1127,23 +1241,56 @@ impl SMFlowsheet {
     }
 
     /// Adds a unit in sequential execution order. Returns its [`UnitId`].
-    pub fn add<M: EquationModel + 'static>(&mut self, name: &str, unit: M) -> UnitId {
+    pub fn add<M: EquationModel + 'static>(&mut self, unit: M) -> UnitId {
         let id = UnitId(self.units.len());
-        self.units.push((name.to_string(), Box::new(unit)));
+        let name = unit.name().to_string();
+        self.units.push((name, Box::new(unit)));
         id
     }
 
-    /// Adds a propagation connection between units.
-    pub fn connect(
-        &mut self,
-        src: UnitId,
-        src_vars: Vec<usize>,
-        dst: UnitId,
-        dst_vars: Vec<usize>,
-    ) -> ConnectionId {
+    /// Pins the inlet of `unit` to the given stream values.
+    ///
+    /// Sets inlet variables on the unit directly so the SM solver uses them as fixed inputs.
+    pub fn feed<F: crate::FlowBasis>(&mut self, unit: UnitId, stream: &crate::Stream<F>) {
+        let inlet_indices = self.units[unit.0].1.inlet_port_indices_dyn(0);
+        let mut vars = self.units[unit.0].1.get_variables();
+        if inlet_indices.len() >= 3 {
+            vars[inlet_indices[0]] = stream.flow();
+            vars[inlet_indices[1]] = stream.temperature();
+            vars[inlet_indices[2]] = stream.pressure();
+        }
+        self.units[unit.0].1.set_variables(&vars);
+    }
+
+    /// Connects the outlet port of `src` to the inlet port of `dst`.
+    ///
+    /// Accepts [`UnitId`] (port 0) or [`OutletPort`]/[`InletPort`] for multi-port units.
+    pub fn connect<S: IntoOutletSpec, D: IntoInletSpec>(&mut self, src: S, dst: D) -> ConnectionId {
+        let (src_unit, src_port) = src.into_outlet_spec();
+        let (dst_unit, dst_port) = dst.into_inlet_spec();
+        let src_vars = self.units[src_unit.0].1.outlet_port_indices_dyn(src_port);
+        let dst_vars = self.units[dst_unit.0].1.inlet_port_indices_dyn(dst_port);
         let id = ConnectionId(self.connections.len());
-        self.connections.push((src.0, src_vars, dst.0, dst_vars));
+        self.connections.push((src_unit.0, src_vars, dst_unit.0, dst_vars));
         id
+    }
+
+    /// Gets outlet stream values (flow, temperature, pressure) for a unit.
+    pub fn outlet(&self, unit: UnitId) -> (f64, f64, f64) {
+        self.units[unit.0].1.get_outlet()
+    }
+
+    /// Prints a human-readable summary of the flowsheet structure.
+    pub fn summary(&self) {
+        println!("SMFlowsheet: {} units, {} connections",
+            self.units.len(), self.connections.len());
+        for (i, (name, unit)) in self.units.iter().enumerate() {
+            println!("  [{}] {} - {} vars, {} eqs", i, name, unit.n_variables(), unit.n_equations());
+        }
+        for (i, (src_idx, src_vars, dst_idx, _)) in self.connections.iter().enumerate() {
+            println!("  Connection {}: {} -> {} ({} stream vars)",
+                i, self.units[*src_idx].0, self.units[*dst_idx].0, src_vars.len());
+        }
     }
 
     /// Solves all units in sequence until convergence, propagating stream values.

@@ -231,19 +231,19 @@ pub trait EquationModel {
         self.set_inlet_port(0, flow, temperature, pressure);
     }
 
-    /// Gets outlet stream properties (F, T, P) for a specific port.
-    fn get_outlet_port(&self, port: usize) -> (f64, f64, f64) {
+    /// Gets outlet stream properties for a specific port.
+    fn get_outlet_port(&self, port: usize) -> StreamProperties {
         let vars = self.get_variables();
         let indices = self.outlet_port_indices(port);
         if indices.len() >= 3 {
-            (vars[indices[0]], vars[indices[1]], vars[indices[2]])
+            StreamProperties::new(vars[indices[0]], vars[indices[1]], vars[indices[2]])
         } else {
-            (0.0, 0.0, 0.0)
+            StreamProperties::default()
         }
     }
 
-    /// Gets outlet stream properties (F, T, P) for port 0.
-    fn get_outlet(&self) -> (f64, f64, f64) {
+    /// Gets outlet stream properties for port 0.
+    fn get_outlet(&self) -> StreamProperties {
         self.get_outlet_port(0)
     }
 }
@@ -251,8 +251,6 @@ pub trait EquationModel {
 /// Prelude module for convenient imports.
 pub mod prelude {
     pub use crate::models::*;
-    #[cfg(feature = "solvers")]
-    pub use crate::solvers::StreamData as SolverStreamData;
     #[cfg(feature = "solvers")]
     pub use crate::solvers::{
         ConnectionId, EOFlowsheet, InletPort, IntoInletSpec, IntoOutletSpec, OutletPort,
@@ -298,6 +296,7 @@ pub mod prelude {
         // Stream types
         Stream,
         StreamData,
+        StreamProperties,
         TimeDomain,
         Var,
         // Variable types
@@ -316,35 +315,76 @@ pub mod prelude {
 /// Main error type for Nomata operations.
 #[derive(Error, Debug)]
 pub enum NomataError {
-    #[error("Stream error: {0}")]
+    /// Stream-level error (invalid flow, composition, etc.).
+    #[error("stream error: {0}")]
     Stream(String),
 
-    #[error("Unit error: {0}")]
+    /// Unit operation error (ill-posed model, inconsistent equations, etc.).
+    #[error("unit error: {0}")]
     Unit(String),
 
-    #[error("Connection error: {0}")]
+    /// Connection error (topology, port type mismatch, etc.).
+    #[error("connection error: {0}")]
     Connection(String),
 
-    #[error("Solver error: {0}")]
+    /// Solver error (convergence, Jacobian, etc.).
+    #[error("solver error: {0}")]
     Solver(String),
 
-    #[error("Validation error: {0}")]
+    /// Flowsheet or model validation failed.
+    #[error("validation error: {0}")]
     Validation(String),
 
-    #[error("Configuration error: {0}")]
+    /// Unit operation was misconfigured (missing required spec, conflicting specs).
+    #[error("configuration error: {0}")]
     Configuration(String),
 
-    #[error("Not solved: flowsheet must be solved before accessing results")]
+    /// A result was queried before the flowsheet was solved.
+    #[error("flowsheet has not been solved — call solve() first")]
     NotSolved,
 
-    #[error("Variable not found: {0}")]
-    VariableNotFound(usize),
+    /// A variable index was out of range for the unit's variable vector.
+    #[error("variable index {index} is out of range (unit has {n_vars} variables)")]
+    VariableOutOfRange {
+        /// The index that was requested.
+        index: usize,
+        /// The number of variables the unit actually has.
+        n_vars: usize,
+    },
 
-    #[error("Port not found: {0}")]
-    PortNotFound(String),
+    /// A port index does not exist on the named unit.
+    #[error("port {port} not found on unit '{unit}'")]
+    PortNotFound {
+        /// The unit's name.
+        unit: String,
+        /// The port index that was requested.
+        port: usize,
+    },
 
-    #[error("Unit not found: {0}")]
-    UnitNotFound(String),
+    /// A unit name was not found in the flowsheet.
+    #[error("unit '{name}' not found in flowsheet")]
+    UnitNotFound {
+        /// The name that was looked up.
+        name: String,
+    },
+
+    /// A required port was not connected before solving.
+    #[error("unit '{unit}' port {port} is required but not connected")]
+    UnconnectedPort {
+        /// The unit's name.
+        unit: String,
+        /// The port index that is dangling.
+        port: usize,
+    },
+
+    /// The solver diverged before converging.
+    #[error("solver diverged at iteration {iteration} (residual {residual:.2e})")]
+    SolverDiverged {
+        /// The iteration at which divergence was detected.
+        iteration: usize,
+        /// The residual norm at that point.
+        residual: f64,
+    },
 }
 
 #[cfg(feature = "solvers")]
@@ -802,6 +842,40 @@ impl FlowBasis for MassFlow {
 
 // Typed Stream
 
+/// Properties of a process stream returned by flowsheet query methods.
+///
+/// This is the named return type for [`EOFlowsheet::outlet`], [`EOFlowsheet::stream`],
+/// [`SMFlowsheet::outlet`], and their inlet counterparts. Use named fields instead of
+/// positional tuple destructuring.
+///
+/// The `composition` field is populated when the flowsheet can trace it (e.g., a
+/// feed composition flowing through a single-inlet single-outlet unit chain). It is
+/// empty — not an error — when composition cannot be determined automatically.
+#[derive(Debug, Clone, Default)]
+pub struct StreamProperties {
+    /// Flow rate \[kg/s or mol/s depending on flow basis\]
+    pub flow: f64,
+    /// Temperature \[K\]
+    pub temperature: f64,
+    /// Pressure \[Pa\]
+    pub pressure: f64,
+    /// Component mole or mass fractions; empty when composition is unknown.
+    pub composition: Vec<f64>,
+}
+
+impl StreamProperties {
+    /// Creates stream properties with flow, temperature, and pressure; no composition.
+    pub fn new(flow: f64, temperature: f64, pressure: f64) -> Self {
+        StreamProperties { flow, temperature, pressure, composition: Vec::new() }
+    }
+
+    /// Attaches a composition vector to these properties.
+    pub fn with_composition(mut self, composition: Vec<f64>) -> Self {
+        self.composition = composition;
+        self
+    }
+}
+
 /// Stream data (runtime).
 #[derive(Debug, Clone)]
 pub struct StreamData {
@@ -993,10 +1067,29 @@ impl<F: FlowBasis> StreamBuilder<F> {
         self
     }
 
-    /// Sets the composition using component names and fractions.
+    /// Sets the composition using component names and fractions as separate arrays.
     pub fn with_composition(mut self, components: &[&str], fractions: &[f64]) -> Self {
         self.components = components.iter().map(|s| s.to_string()).collect();
         self.composition = fractions.to_vec();
+        self
+    }
+
+    /// Sets the composition using `(name, fraction)` pairs.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use nomata::prelude::*;
+    ///
+    /// let stream = Stream::<MolarFlow>::new()
+    ///     .with_flow(100.0)
+    ///     .with_composition_pairs(&[("Methane", 0.8), ("Ethane", 0.15), ("Propane", 0.05)])
+    ///     .build()
+    ///     .unwrap();
+    /// ```
+    pub fn with_composition_pairs(mut self, pairs: &[(&str, f64)]) -> Self {
+        self.components = pairs.iter().map(|(n, _)| n.to_string()).collect();
+        self.composition = pairs.iter().map(|(_, f)| *f).collect();
         self
     }
 

@@ -45,6 +45,42 @@ use crate::{EquationModel, MassFlow, NomataError, NomataResult, Process, Stream}
 #[cfg(feature = "thermodynamics")]
 use crate::thermodynamics::Fluid;
 
+/// Named accessor for pump variables.
+///
+/// Use with [`Pump::var`] to read individual variable values by name instead
+/// of by raw index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PumpVar {
+    /// Inlet flow rate \[kg/s\]
+    InletFlow,
+    /// Inlet temperature \[K\]
+    InletTemperature,
+    /// Inlet pressure \[Pa\]
+    InletPressure,
+    /// Outlet flow rate \[kg/s\]
+    OutletFlow,
+    /// Outlet temperature \[K\]
+    OutletTemperature,
+    /// Outlet pressure \[Pa\]
+    OutletPressure,
+    /// Shaft work input \[W\]
+    ShaftWork,
+}
+
+impl PumpVar {
+    fn index(self) -> usize {
+        match self {
+            PumpVar::InletFlow => 0,
+            PumpVar::InletTemperature => 1,
+            PumpVar::InletPressure => 2,
+            PumpVar::OutletFlow => 3,
+            PumpVar::OutletTemperature => 4,
+            PumpVar::OutletPressure => 5,
+            PumpVar::ShaftWork => 6,
+        }
+    }
+}
+
 /// Variable indices for the pump model.
 #[derive(Clone, Copy)]
 struct PumpVars {
@@ -110,6 +146,14 @@ impl Pump {
     /// Gets the computed work [W] from the last process call.
     pub fn work(&self) -> f64 {
         self.vars[PumpVars::default().work]
+    }
+
+    /// Returns the current value of a named variable.
+    ///
+    /// Prefer this over indexing `get_variables()` directly to avoid
+    /// hard-coded index magic numbers.
+    pub fn var(&self, v: PumpVar) -> f64 {
+        self.vars[v.index()]
     }
 
     /// Gets the outlet pressure specification [Pa], if any.

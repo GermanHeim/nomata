@@ -36,6 +36,7 @@
 //! when fractions sum to 1.0.
 
 use crate::{EquationModel, FlowBasis, MassFlow, NomataResult, Process, Stream};
+use super::PortVar;
 
 // Helper to normalize fractions and issue warning
 fn normalize_and_warn<const N: usize>(fractions: &mut [f64; N], name: &str) {
@@ -98,6 +99,21 @@ impl<const N: usize, F: FlowBasis> Splitter<N, F> {
     /// Gets the splitter name.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Returns a variable from the inlet stream.
+    ///
+    /// `var` selects `Flow`, `Temperature`, or `Pressure`.
+    pub fn inlet_var(&self, var: PortVar) -> f64 {
+        self.vars[var as usize]
+    }
+
+    /// Returns a variable from the given outlet port.
+    ///
+    /// `port` is 0-indexed; `var` selects `Flow`, `Temperature`, or `Pressure`.
+    pub fn outlet_var(&self, port: usize, var: PortVar) -> f64 {
+        let offset = 3 + port * 3 + var as usize;
+        self.vars[offset]
     }
 
     /// Gets the split fractions.

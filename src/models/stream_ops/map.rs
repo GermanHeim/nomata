@@ -126,6 +126,38 @@ pub struct Map {
     vars: [f64; 6],
 }
 
+/// Named accessor for Map unit variables.
+///
+/// Use with [`Map::var`] to read individual variable values by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapVar {
+    /// Inlet flow rate \[mol/s\]
+    InletFlow,
+    /// Inlet temperature \[K\]
+    InletTemperature,
+    /// Inlet pressure \[Pa\]
+    InletPressure,
+    /// Outlet flow rate \[mol/s\]
+    OutletFlow,
+    /// Outlet temperature \[K\]
+    OutletTemperature,
+    /// Outlet pressure \[Pa\]
+    OutletPressure,
+}
+
+impl MapVar {
+    fn index(self) -> usize {
+        match self {
+            MapVar::InletFlow => 0,
+            MapVar::InletTemperature => 1,
+            MapVar::InletPressure => 2,
+            MapVar::OutletFlow => 3,
+            MapVar::OutletTemperature => 4,
+            MapVar::OutletPressure => 5,
+        }
+    }
+}
+
 impl Map {
     /// Creates a new MAP builder.
     pub fn new(name: &str) -> MapBuilder {
@@ -139,6 +171,11 @@ impl Map {
     /// Gets the mapper name.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Returns the current value of a named variable.
+    pub fn var(&self, v: MapVar) -> f64 {
+        self.vars[v.index()]
     }
 
     /// Gets the transformation direction.

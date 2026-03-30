@@ -68,6 +68,50 @@ pub struct FlashSeparator {
     vapor_composition: Vec<f64>,
 }
 
+/// Named accessor for flash separator variables.
+///
+/// Use with [`FlashSeparator::var`] to read individual variable values by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlashSeparatorVar {
+    /// Feed flow rate \[mol/s\]
+    InletFlow,
+    /// Feed temperature \[K\]
+    InletTemperature,
+    /// Feed pressure \[Pa\]
+    InletPressure,
+    /// Vapor outlet flow rate \[mol/s\]
+    VaporFlow,
+    /// Vapor outlet temperature \[K\]
+    VaporTemperature,
+    /// Vapor outlet pressure \[Pa\]
+    VaporPressure,
+    /// Liquid outlet flow rate \[mol/s\]
+    LiquidFlow,
+    /// Liquid outlet temperature \[K\]
+    LiquidTemperature,
+    /// Liquid outlet pressure \[Pa\]
+    LiquidPressure,
+    /// Vapor fraction ψ (psi), 0 = all liquid, 1 = all vapor
+    VaporFraction,
+}
+
+impl FlashSeparatorVar {
+    fn index(self) -> usize {
+        match self {
+            FlashSeparatorVar::InletFlow => 0,
+            FlashSeparatorVar::InletTemperature => 1,
+            FlashSeparatorVar::InletPressure => 2,
+            FlashSeparatorVar::VaporFlow => 3,
+            FlashSeparatorVar::VaporTemperature => 4,
+            FlashSeparatorVar::VaporPressure => 5,
+            FlashSeparatorVar::LiquidFlow => 6,
+            FlashSeparatorVar::LiquidTemperature => 7,
+            FlashSeparatorVar::LiquidPressure => 8,
+            FlashSeparatorVar::VaporFraction => 9,
+        }
+    }
+}
+
 /// Variable indices for FlashSeparator
 struct FlashVars {
     f_in: usize,
@@ -116,8 +160,12 @@ impl FlashSeparator {
 
     /// Gets the vapor fraction after calculation.
     pub fn vapor_fraction(&self) -> f64 {
-        let idx = FlashVars::default();
-        self.vars[idx.psi]
+        self.var(FlashSeparatorVar::VaporFraction)
+    }
+
+    /// Returns the current value of a named variable.
+    pub fn var(&self, v: FlashSeparatorVar) -> f64 {
+        self.vars[v.index()]
     }
 
     /// Gets the liquid composition after calculation.

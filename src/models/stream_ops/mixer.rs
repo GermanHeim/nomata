@@ -37,6 +37,7 @@
 //! 3. **Pressure**: P_out = min(P_in_i) (isobaric mixing at lowest pressure)
 
 use crate::{EquationModel, FlowBasis, MassFlow, NomataResult, Process, Stream};
+use super::PortVar;
 
 /// Stream mixer with const generic N inlets.
 ///
@@ -76,6 +77,22 @@ impl<const N: usize, F: FlowBasis> Mixer<N, F> {
     /// Gets the mixer name.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Returns a variable from the given inlet port.
+    ///
+    /// `port` is 0-indexed; `var` selects `Flow`, `Temperature`, or `Pressure`.
+    pub fn inlet_var(&self, port: usize, var: PortVar) -> f64 {
+        let offset = port * 3 + var as usize;
+        self.vars[offset]
+    }
+
+    /// Returns a variable from the outlet stream.
+    ///
+    /// `var` selects `Flow`, `Temperature`, or `Pressure`.
+    pub fn outlet_var(&self, var: PortVar) -> f64 {
+        let offset = N * 3 + var as usize;
+        self.vars[offset]
     }
 
     /// Total number of variables: N inlets * 3 + 1 outlet * 3

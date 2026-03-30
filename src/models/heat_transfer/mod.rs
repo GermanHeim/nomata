@@ -6,4 +6,4 @@
 
 mod heat_exchanger;
 
-pub use heat_exchanger::{HeatExchanger, HeatExchangerBuilder};
+pub use heat_exchanger::{HeatExchanger, HeatExchangerBuilder, HeatExchangerVar};

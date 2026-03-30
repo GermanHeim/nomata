@@ -42,6 +42,38 @@ use crate::{EquationModel, MassFlow, NomataError, NomataResult, Process, Stream}
 #[cfg(feature = "thermodynamics")]
 use crate::thermodynamics::Fluid;
 
+/// Named accessor for valve variables.
+///
+/// Use with [`Valve::var`] to read individual variable values by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValveVar {
+    /// Inlet flow rate \[kg/s\]
+    InletFlow,
+    /// Inlet temperature \[K\]
+    InletTemperature,
+    /// Inlet pressure \[Pa\]
+    InletPressure,
+    /// Outlet flow rate \[kg/s\]
+    OutletFlow,
+    /// Outlet temperature \[K\]
+    OutletTemperature,
+    /// Outlet pressure \[Pa\]
+    OutletPressure,
+}
+
+impl ValveVar {
+    fn index(self) -> usize {
+        match self {
+            ValveVar::InletFlow => 0,
+            ValveVar::InletTemperature => 1,
+            ValveVar::InletPressure => 2,
+            ValveVar::OutletFlow => 3,
+            ValveVar::OutletTemperature => 4,
+            ValveVar::OutletPressure => 5,
+        }
+    }
+}
+
 /// Variable indices for the valve model.
 #[derive(Clone, Copy)]
 struct ValveVars {
@@ -90,6 +122,11 @@ impl Valve {
     /// Gets the valve name.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Returns the current value of a named variable.
+    pub fn var(&self, v: ValveVar) -> f64 {
+        self.vars[v.index()]
     }
 
     /// Gets the pressure drop specification [Pa], if any.

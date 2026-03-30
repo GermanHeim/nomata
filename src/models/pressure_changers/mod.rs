@@ -10,6 +10,6 @@ mod compressor;
 mod pump;
 mod valve;
 
-pub use compressor::{Compressor, CompressorBuilder};
-pub use pump::{Pump, PumpBuilder};
-pub use valve::{Valve, ValveBuilder};
+pub use compressor::{Compressor, CompressorBuilder, CompressorVar};
+pub use pump::{Pump, PumpBuilder, PumpVar};
+pub use valve::{Valve, ValveBuilder, ValveVar};

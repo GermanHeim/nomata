@@ -33,12 +33,13 @@ pub mod separators;
 pub mod stream_ops;
 
 // Re-export all models at the top level for convenience
-pub use heat_transfer::{HeatExchanger, HeatExchangerBuilder, Heater, HeaterBuilder};
+pub use heat_transfer::{HeatExchanger, HeatExchangerBuilder, HeatExchangerVar, Heater, HeaterBuilder, HeaterVar};
 pub use pressure_changers::{
-    Compressor, CompressorBuilder, Pump, PumpBuilder, Valve, ValveBuilder,
+    Compressor, CompressorBuilder, CompressorVar, Pump, PumpBuilder, PumpVar, Valve, ValveBuilder,
+    ValveVar,
 };
-pub use separators::{FlashOutput, FlashSeparator, FlashSeparatorBuilder};
+pub use separators::{FlashOutput, FlashSeparator, FlashSeparatorBuilder, FlashSeparatorVar};
 pub use stream_ops::{
-    ComponentMapping, Map, MapBuilder, MappingDirection, Mixer, MixerBuilder, Splitter,
-    SplitterBuilder,
+    ComponentMapping, Map, MapBuilder, MapVar, MappingDirection, Mixer, MixerBuilder, PortVar,
+    Splitter, SplitterBuilder,
 };

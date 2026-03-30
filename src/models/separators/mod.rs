@@ -6,4 +6,4 @@
 
 mod flash_separator;
 
-pub use flash_separator::{FlashOutput, FlashSeparator, FlashSeparatorBuilder};
+pub use flash_separator::{FlashOutput, FlashSeparator, FlashSeparatorBuilder, FlashSeparatorVar};

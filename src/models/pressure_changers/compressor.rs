@@ -37,6 +37,41 @@ use crate::{EquationModel, MassFlow, NomataError, NomataResult, Process, Stream}
 #[cfg(feature = "thermodynamics")]
 use crate::thermodynamics::Fluid;
 
+/// Named accessor for compressor variables.
+///
+/// Use with [`Compressor::var`] to read individual variable values by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompressorVar {
+    /// Inlet flow rate \[kg/s\]
+    InletFlow,
+    /// Inlet temperature \[K\]
+    InletTemperature,
+    /// Inlet pressure \[Pa\]
+    InletPressure,
+    /// Outlet flow rate \[kg/s\]
+    OutletFlow,
+    /// Outlet temperature \[K\]
+    OutletTemperature,
+    /// Outlet pressure \[Pa\]
+    OutletPressure,
+    /// Shaft work input \[W\]
+    ShaftWork,
+}
+
+impl CompressorVar {
+    fn index(self) -> usize {
+        match self {
+            CompressorVar::InletFlow => 0,
+            CompressorVar::InletTemperature => 1,
+            CompressorVar::InletPressure => 2,
+            CompressorVar::OutletFlow => 3,
+            CompressorVar::OutletTemperature => 4,
+            CompressorVar::OutletPressure => 5,
+            CompressorVar::ShaftWork => 6,
+        }
+    }
+}
+
 /// Variable indices for the compressor model.
 #[derive(Clone, Copy)]
 struct CompressorVars {
@@ -102,6 +137,11 @@ impl Compressor {
     /// Gets the computed work [W] from the last process call.
     pub fn work(&self) -> f64 {
         self.vars[CompressorVars::default().work]
+    }
+
+    /// Returns the current value of a named variable.
+    pub fn var(&self, v: CompressorVar) -> f64 {
+        self.vars[v.index()]
     }
 
     fn residuals_generic<S: crate::Scalar>(&self, vars: &[S]) -> Vec<S> {

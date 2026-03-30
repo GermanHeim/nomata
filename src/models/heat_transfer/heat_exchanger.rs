@@ -44,6 +44,59 @@ use crate::{EquationModel, MassFlow, NomataError, NomataResult, Process, Stream}
 #[cfg(feature = "thermodynamics")]
 use crate::thermodynamics::Fluid;
 
+/// Named accessor for heat exchanger variables.
+///
+/// Use with [`HeatExchanger::var`] to read individual variable values by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeatExchangerVar {
+    /// Hot-side inlet flow rate \[kg/s\]
+    HotInletFlow,
+    /// Hot-side inlet temperature \[K\]
+    HotInletTemperature,
+    /// Hot-side inlet pressure \[Pa\]
+    HotInletPressure,
+    /// Hot-side outlet flow rate \[kg/s\]
+    HotOutletFlow,
+    /// Hot-side outlet temperature \[K\]
+    HotOutletTemperature,
+    /// Hot-side outlet pressure \[Pa\]
+    HotOutletPressure,
+    /// Cold-side inlet flow rate \[kg/s\]
+    ColdInletFlow,
+    /// Cold-side inlet temperature \[K\]
+    ColdInletTemperature,
+    /// Cold-side inlet pressure \[Pa\]
+    ColdInletPressure,
+    /// Cold-side outlet flow rate \[kg/s\]
+    ColdOutletFlow,
+    /// Cold-side outlet temperature \[K\]
+    ColdOutletTemperature,
+    /// Cold-side outlet pressure \[Pa\]
+    ColdOutletPressure,
+    /// Exchanged heat duty \[W\]
+    Duty,
+}
+
+impl HeatExchangerVar {
+    fn index(self) -> usize {
+        match self {
+            HeatExchangerVar::HotInletFlow => 0,
+            HeatExchangerVar::HotInletTemperature => 1,
+            HeatExchangerVar::HotInletPressure => 2,
+            HeatExchangerVar::HotOutletFlow => 3,
+            HeatExchangerVar::HotOutletTemperature => 4,
+            HeatExchangerVar::HotOutletPressure => 5,
+            HeatExchangerVar::ColdInletFlow => 6,
+            HeatExchangerVar::ColdInletTemperature => 7,
+            HeatExchangerVar::ColdInletPressure => 8,
+            HeatExchangerVar::ColdOutletFlow => 9,
+            HeatExchangerVar::ColdOutletTemperature => 10,
+            HeatExchangerVar::ColdOutletPressure => 11,
+            HeatExchangerVar::Duty => 12,
+        }
+    }
+}
+
 /// Variable layout for the heat exchanger:
 /// [F_hi, T_hi, P_hi, F_ho, T_ho, P_ho, F_ci, T_ci, P_ci, F_co, T_co, P_co, Q]
 ///  0     1     2     3     4     5     6     7     8     9     10    11    12
@@ -138,6 +191,11 @@ impl HeatExchanger {
     /// Gets the computed heat duty [W] from the last solve or process call.
     pub fn duty(&self) -> f64 {
         self.vars[HexVars::default().q]
+    }
+
+    /// Returns the current value of a named variable.
+    pub fn var(&self, v: HeatExchangerVar) -> f64 {
+        self.vars[v.index()]
     }
 
     fn residuals_generic<S: crate::Scalar>(&self, vars: &[S]) -> Vec<S> {

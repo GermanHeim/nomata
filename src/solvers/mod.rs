@@ -74,10 +74,11 @@
 // Submodules
 pub mod recycle;
 
-use crate::EquationModel;
+use crate::{EquationModel, StreamProperties};
 #[cfg(feature = "autodiff")]
 use crate::autodiff::compute_jacobian;
 use nalgebra::{DMatrix, DVector};
+use std::collections::HashMap;
 
 /// Result type for solver operations.
 pub type SolverResult<T> = Result<T, SolverError>;
@@ -452,24 +453,6 @@ impl UnitId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ConnectionId(pub usize);
 
-/// Stream state: flow, temperature, pressure.
-#[derive(Debug, Clone, Copy)]
-pub struct StreamData {
-    /// Mass or molar flow rate
-    pub flow: f64,
-    /// Temperature (K)
-    pub temperature: f64,
-    /// Pressure (Pa)
-    pub pressure: f64,
-}
-
-impl StreamData {
-    /// Creates a new stream with the given properties.
-    pub fn new(flow: f64, temperature: f64, pressure: f64) -> Self {
-        StreamData { flow, temperature, pressure }
-    }
-}
-
 /// Reference to an outlet port of a unit.
 #[derive(Debug, Clone, Copy)]
 pub struct OutletPort {
@@ -553,16 +536,20 @@ pub trait EquationModelDyn {
     fn inlet_port_indices_dyn(&self, port: usize) -> Vec<usize>;
     /// Returns outlet port variable indices for the given port number.
     fn outlet_port_indices_dyn(&self, port: usize) -> Vec<usize>;
-    /// Returns the outlet stream values (flow, temp, pressure) for port 0.
-    fn get_outlet(&self) -> (f64, f64, f64) {
+    /// Returns the number of inlet ports.
+    fn n_inlet_ports_dyn(&self) -> usize;
+    /// Returns the number of outlet ports.
+    fn n_outlet_ports_dyn(&self) -> usize;
+    /// Returns outlet stream properties for port 0.
+    fn get_outlet(&self) -> StreamProperties {
         let vars = self.get_variables();
         let n = vars.len();
         if n >= 6 {
-            (vars[n - 3], vars[n - 2], vars[n - 1])
+            StreamProperties::new(vars[n - 3], vars[n - 2], vars[n - 1])
         } else if n >= 3 {
-            (vars[0], vars[1], vars[2])
+            StreamProperties::new(vars[0], vars[1], vars[2])
         } else {
-            (0.0, 0.0, 0.0)
+            StreamProperties::default()
         }
     }
     /// Compute residuals with dual numbers for automatic differentiation.
@@ -600,6 +587,12 @@ impl<T: EquationModel> EquationModelDyn for T {
     }
     fn outlet_port_indices_dyn(&self, port: usize) -> Vec<usize> {
         EquationModel::outlet_port_indices(self, port)
+    }
+    fn n_inlet_ports_dyn(&self) -> usize {
+        EquationModel::n_inlet_ports(self)
+    }
+    fn n_outlet_ports_dyn(&self) -> usize {
+        EquationModel::n_outlet_ports(self)
     }
     #[cfg(feature = "autodiff")]
     fn residuals_dual(&self, vars: &[num_dual::Dual64]) -> Vec<num_dual::Dual64> {
@@ -769,12 +762,19 @@ pub struct EOFlowsheet {
     pub(crate) connections: Vec<(usize, Vec<usize>, usize, Vec<usize>)>,
     /// Feeds: (unit_index, var_indices, values).
     pub(crate) feeds: Vec<(usize, Vec<usize>, Vec<f64>)>,
+    /// Inlet compositions stored per unit index (set when a feed with composition is applied).
+    unit_compositions: HashMap<usize, Vec<f64>>,
 }
 
 impl EOFlowsheet {
     /// Creates a new empty flowsheet.
     pub fn new() -> Self {
-        EOFlowsheet { units: Vec::new(), connections: Vec::new(), feeds: Vec::new() }
+        EOFlowsheet {
+            units: Vec::new(),
+            connections: Vec::new(),
+            feeds: Vec::new(),
+            unit_compositions: HashMap::new(),
+        }
     }
 
     /// Adds a unit to the flowsheet and returns its [`UnitId`].
@@ -822,7 +822,15 @@ impl EOFlowsheet {
     /// The solver will keep these variables fixed throughout the solve.
     pub fn feed<F: crate::FlowBasis>(&mut self, unit: UnitId, stream: &crate::Stream<F>) {
         let inlet_indices = self.units[unit.0].1.inlet_port_indices_dyn(0);
-        self.feeds.push((unit.0, inlet_indices, vec![stream.flow(), stream.temperature(), stream.pressure()]));
+        self.feeds.push((
+            unit.0,
+            inlet_indices,
+            vec![stream.flow(), stream.temperature(), stream.pressure()],
+        ));
+        let comp = stream.composition();
+        if !comp.is_empty() {
+            self.unit_compositions.insert(unit.0, comp);
+        }
     }
 
     /// Sets initial guess values for the outlet of a unit or port.
@@ -840,15 +848,53 @@ impl EOFlowsheet {
         self.units[unit.0].1.set_variables(&vars);
     }
 
-    /// Returns stream data for a connection after the flowsheet has been solved.
-    pub fn stream(&self, conn_id: ConnectionId) -> StreamData {
+    /// Returns properties of a stream on the outlet side of a connection after solving.
+    pub fn stream(&self, conn_id: ConnectionId) -> StreamProperties {
         let (src_idx, src_vars, _, _) = &self.connections[conn_id.0];
         let vars = self.units[*src_idx].1.get_variables();
-        StreamData {
-            flow: src_vars.first().map(|&i| vars[i]).unwrap_or(0.0),
-            temperature: src_vars.get(1).map(|&i| vars[i]).unwrap_or(0.0),
-            pressure: src_vars.get(2).map(|&i| vars[i]).unwrap_or(0.0),
+        let props = StreamProperties::new(
+            src_vars.first().map(|&i| vars[i]).unwrap_or(0.0),
+            src_vars.get(1).map(|&i| vars[i]).unwrap_or(0.0),
+            src_vars.get(2).map(|&i| vars[i]).unwrap_or(0.0),
+        );
+        props.with_composition(self.derive_outlet_composition(*src_idx))
+    }
+
+    /// Returns properties of a stream on the inlet side of a connection after solving.
+    ///
+    /// This is the symmetric counterpart to [`stream`](Self::stream), which queries
+    /// the outlet (source) side.
+    pub fn inlet(&self, conn_id: ConnectionId) -> StreamProperties {
+        let (_, _, dst_idx, dst_vars) = &self.connections[conn_id.0];
+        let vars = self.units[*dst_idx].1.get_variables();
+        let props = StreamProperties::new(
+            dst_vars.first().map(|&i| vars[i]).unwrap_or(0.0),
+            dst_vars.get(1).map(|&i| vars[i]).unwrap_or(0.0),
+            dst_vars.get(2).map(|&i| vars[i]).unwrap_or(0.0),
+        );
+        // Inlet and outlet on the same connection carry the same stream, so composition is the same.
+        props.with_composition(self.derive_outlet_composition(
+            self.connections[conn_id.0].0,
+        ))
+    }
+
+    /// Derives the outlet composition for a unit by tracing back through the feed/connection graph.
+    ///
+    /// Returns an empty `Vec` when the composition cannot be determined automatically
+    /// (e.g., the unit is a mixer, splitter, or flash separator).
+    fn derive_outlet_composition(&self, unit_idx: usize) -> Vec<f64> {
+        if let Some(comp) = self.unit_compositions.get(&unit_idx) {
+            return comp.clone();
         }
+        let unit = &self.units[unit_idx].1;
+        if unit.n_inlet_ports_dyn() == 1 && unit.n_outlet_ports_dyn() == 1 {
+            for (src_idx, _, dst_idx, _) in &self.connections {
+                if *dst_idx == unit_idx {
+                    return self.derive_outlet_composition(*src_idx);
+                }
+            }
+        }
+        Vec::new()
     }
 
     /// Prints a human-readable summary of the flowsheet structure.
@@ -864,12 +910,45 @@ impl EOFlowsheet {
         }
     }
 
-    /// Sets feed stream values for a unit by explicit variable indices.
+    /// Returns the [`UnitId`] of the first unit with the given name, or `None`.
+    pub fn unit_by_name(&self, name: &str) -> Option<UnitId> {
+        self.units.iter().position(|(n, _)| n == name).map(UnitId)
+    }
+
+    /// Validates the flowsheet before solving.
     ///
-    /// The solver will fix these variables at the given values throughout the solve.
-    /// Prefer [`EOFlowsheet::feed`] for stream-typed feeds.
-    pub fn set_feed(&mut self, unit: UnitId, var_indices: Vec<usize>, values: Vec<f64>) {
-        self.feeds.push((unit.0, var_indices, values));
+    /// Checks that:
+    /// - Every unit has at least one equation.
+    /// - The number of free variables equals the number of equations (system is square).
+    ///
+    /// Returns `Ok(())` on success or a descriptive error.
+    pub fn validate(&self) -> crate::NomataResult<()> {
+        use crate::NomataError;
+
+        for (name, unit) in &self.units {
+            if unit.n_equations() == 0 {
+                return Err(NomataError::Unit(format!(
+                    "unit '{}' has no equations",
+                    name
+                )));
+            }
+        }
+
+        let n_free = {
+            let n_total: usize = self.units.iter().map(|(_, u)| u.n_variables()).sum();
+            let n_pinned: usize = self.feeds.iter().map(|(_, vi, _)| vi.len()).sum();
+            n_total.saturating_sub(n_pinned)
+        };
+        let n_eqs = self.total_equations();
+
+        if n_free != n_eqs {
+            return Err(NomataError::Validation(format!(
+                "system is not square: {} free variables but {} equations",
+                n_free, n_eqs
+            )));
+        }
+
+        Ok(())
     }
 
     /// Returns all variables as a flat vector, applying feeds.
@@ -1096,9 +1175,11 @@ impl EOFlowsheet {
         self.units[unit.0].1.get_variables()
     }
 
-    /// Gets outlet stream values (flow, temperature, pressure) for a unit.
-    pub fn outlet(&self, unit: UnitId) -> (f64, f64, f64) {
-        self.units[unit.0].1.get_outlet()
+    /// Returns outlet stream properties for a unit after solving.
+    pub fn outlet(&self, unit: UnitId) -> StreamProperties {
+        let mut props = self.units[unit.0].1.get_outlet();
+        props.composition = self.derive_outlet_composition(unit.0);
+        props
     }
 
     /// Prints a human-readable summary of the flowsheet.
@@ -1232,12 +1313,18 @@ pub struct SMFlowsheet {
     units: Vec<(String, Box<dyn EquationModelDyn>)>,
     /// Propagation connections: (src_unit, src_vars, dst_unit, dst_vars).
     connections: Vec<(usize, Vec<usize>, usize, Vec<usize>)>,
+    /// Inlet compositions stored per unit index (set when a feed with composition is applied).
+    unit_compositions: HashMap<usize, Vec<f64>>,
 }
 
 impl SMFlowsheet {
     /// Creates a new empty SMFlowsheet.
     pub fn new() -> Self {
-        SMFlowsheet { units: Vec::new(), connections: Vec::new() }
+        SMFlowsheet {
+            units: Vec::new(),
+            connections: Vec::new(),
+            unit_compositions: HashMap::new(),
+        }
     }
 
     /// Adds a unit in sequential execution order. Returns its [`UnitId`].
@@ -1260,6 +1347,10 @@ impl SMFlowsheet {
             vars[inlet_indices[2]] = stream.pressure();
         }
         self.units[unit.0].1.set_variables(&vars);
+        let comp = stream.composition();
+        if !comp.is_empty() {
+            self.unit_compositions.insert(unit.0, comp);
+        }
     }
 
     /// Connects the outlet port of `src` to the inlet port of `dst`.
@@ -1275,9 +1366,55 @@ impl SMFlowsheet {
         id
     }
 
-    /// Gets outlet stream values (flow, temperature, pressure) for a unit.
-    pub fn outlet(&self, unit: UnitId) -> (f64, f64, f64) {
-        self.units[unit.0].1.get_outlet()
+    /// Returns outlet stream properties for a unit after solving.
+    pub fn outlet(&self, unit: UnitId) -> StreamProperties {
+        let mut props = self.units[unit.0].1.get_outlet();
+        props.composition = self.derive_outlet_composition(unit.0);
+        props
+    }
+
+    /// Returns properties of a stream on the inlet side of a connection after solving.
+    pub fn inlet(&self, conn_id: ConnectionId) -> StreamProperties {
+        let (_, _, dst_idx, dst_vars) = &self.connections[conn_id.0];
+        let vars = self.units[*dst_idx].1.get_variables();
+        let props = StreamProperties::new(
+            dst_vars.first().map(|&i| vars[i]).unwrap_or(0.0),
+            dst_vars.get(1).map(|&i| vars[i]).unwrap_or(0.0),
+            dst_vars.get(2).map(|&i| vars[i]).unwrap_or(0.0),
+        );
+        props.with_composition(self.derive_outlet_composition(self.connections[conn_id.0].0))
+    }
+
+    /// Returns the [`UnitId`] of the first unit with the given name, or `None`.
+    pub fn unit_by_name(&self, name: &str) -> Option<UnitId> {
+        self.units.iter().position(|(n, _)| n == name).map(UnitId)
+    }
+
+    /// Validates the flowsheet before solving.
+    pub fn validate(&self) -> crate::NomataResult<()> {
+        use crate::NomataError;
+        for (name, unit) in &self.units {
+            if unit.n_equations() == 0 {
+                return Err(NomataError::Unit(format!("unit '{}' has no equations", name)));
+            }
+        }
+        Ok(())
+    }
+
+    /// Derives the outlet composition for a unit by tracing back through the feed/connection graph.
+    fn derive_outlet_composition(&self, unit_idx: usize) -> Vec<f64> {
+        if let Some(comp) = self.unit_compositions.get(&unit_idx) {
+            return comp.clone();
+        }
+        let unit = &self.units[unit_idx].1;
+        if unit.n_inlet_ports_dyn() == 1 && unit.n_outlet_ports_dyn() == 1 {
+            for (src_idx, _, dst_idx, _) in &self.connections {
+                if *dst_idx == unit_idx {
+                    return self.derive_outlet_composition(*src_idx);
+                }
+            }
+        }
+        Vec::new()
     }
 
     /// Prints a human-readable summary of the flowsheet structure.
